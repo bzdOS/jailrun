@@ -1,0 +1,61 @@
+{
+  "image": "esphome/esphome:stable",
+  "manifest_summary": {
+    "native_binaries": 348,
+    "total_binaries": 1112
+  },
+  "cold_start_native": {
+    "label": "native",
+    "n": 5,
+    "samples_s": [
+      1.6704595150004025,
+      1.645289585001592,
+      1.6434731779954745,
+      1.6404202030025772,
+      1.6503246200009016
+    ],
+    "median_s": 1.645289585001592,
+    "p95_s": 1.684553941500053
+  },
+  "cold_start_linuxulator": {
+    "label": "linuxulator",
+    "n": 5,
+    "samples_s": [
+      1.6408055079955375,
+      1.628634176995547,
+      1.6441111390013248,
+      1.6519684250015416,
+      1.68520009599888
+    ],
+    "median_s": 1.6441111390013248,
+    "p95_s": 1.7084622656970168
+  },
+  "compile_native": {
+    "label": "native",
+    "n": 1,
+    "samples_s": [
+      144.06469694699626
+    ],
+    "median_s": 144.06469694699626,
+    "p95_s": 144.06469694699626
+  },
+  "compile_linuxulator": {
+    "label": "linuxulator",
+    "n": 1,
+    "samples_s": [
+      206.73090371199942
+    ],
+    "median_s": 206.73090371199942,
+    "p95_s": 206.73090371199942
+  },
+  "compile_docker": {
+    "label": "docker",
+    "n": 1,
+    "samples_s": [
+      137.547736827
+    ],
+    "median_s": 137.547736827,
+    "p95_s": 137.547736827,
+    "note": "docker run on the Linux host that hypervises the FreeBSD VM used for the other arms (same physical CPU, not the same resource allocation -- see bench/README.md)"
+  }
+}

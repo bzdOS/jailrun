@@ -1,0 +1,9 @@
+esphome:
+  name: blink-test
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:

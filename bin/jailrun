@@ -1,0 +1,17 @@
+#!/bin/sh
+# START_AI_HEADER
+# MODULE: bin/jailrun
+# PURPOSE: entry-point shim that launches runtime.cli as a Python module without installation
+# INTENT: lets the binary be invoked directly from the repo checkout; resolves repo root
+#         relative to the script so it works from any cwd
+# DEPENDENCIES: sh, python3, runtime/cli.py (via -m runtime.cli)
+# PUBLIC_API: none — exec-only shim, no callable functions
+# END_AI_HEADER
+# jailrun CLI shim — runs the runtime module from the repo without installation.
+# Resolves the repo root from this script's location so it works from anywhere.
+here=$(cd "$(dirname "$0")/.." && pwd)
+# Fixed 2026-07-19: $here was computed but never used — `python3 -m
+# runtime.cli` only resolves the runtime package if cwd already happens to be
+# the repo root (or it's on PYTHONPATH), so this shim did NOT actually work
+# "from any cwd" as documented. Export PYTHONPATH so it genuinely does.
+PYTHONPATH="${here}${PYTHONPATH:+:${PYTHONPATH}}" exec python3 -m runtime.cli "$@"

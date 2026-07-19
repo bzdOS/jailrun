@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jailrun/schemas/substitution-manifest.schema.json",
+  "title": "jailrun substitution manifest",
+  "description": "Central contract artifact. probe(S2) produces it; bakery(S4) fills `native`; runtime(S1) consumes it. Decides, per binary in an OCI image, whether to run a native FreeBSD substitute or the Linux binary under Linuxulator.",
+  "type": "object",
+  "required": ["image", "binaries", "linuxulator"],
+  "additionalProperties": false,
+  "properties": {
+    "image": { "type": "string", "description": "OCI image reference, e.g. esphome/esphome:2025.5" },
+    "generated_at": { "type": "string", "description": "ISO8601; stamped by the caller, not the script" },
+    "rootfs_snapshot": { "type": "string", "description": "S3 snapshot_id the probe ran against" },
+    "binaries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "abi", "status"],
+        "additionalProperties": false,
+        "properties": {
+          "path": { "type": "string", "description": "absolute path INSIDE the image rootfs" },
+          "role": { "enum": ["load-bearing", "auxiliary", "unknown"], "default": "unknown" },
+          "abi": { "enum": ["linux", "freebsd", "script", "unknown"], "description": "ELF OSABI / shebang classification" },
+          "status": {
+            "enum": ["native", "linuxulator", "missing", "unknown"],
+            "description": "native = substitute with FreeBSD artifact; linuxulator = run Linux binary under ABI; missing = no way yet; unknown = not yet classified"
+          },
+          "native": {
+            "type": ["object", "null"],
+            "description": "How to satisfy natively. provider proposed by probe(S2); artifact_path resolved by bakery(S4).",
+            "required": ["provider"],
+            "additionalProperties": false,
+            "properties": {
+              "provider": { "type": "string", "description": "pkg:<name> | port:<origin> | build:<recipe-id>" },
+              "artifact_path": { "type": ["string", "null"], "description": "resolved native binary path in the base (filled by bakery)" }
+            }
+          },
+          "syscalls_needed": { "type": "array", "items": { "type": "string" }, "default": [] },
+          "notes": { "type": "string" }
+        }
+      }
+    },
+    "linuxulator": {
+      "type": "object",
+      "required": ["required"],
+      "additionalProperties": false,
+      "properties": {
+        "required": { "type": "boolean", "description": "true if ANY binary stays status=linuxulator" },
+        "gaps": { "type": "array", "items": { "type": "string" }, "description": "unimplemented syscalls/features observed during smoke" },
+        "risk": { "enum": ["none", "low", "medium", "high"], "default": "none" }
+      }
+    },
+    "_bakery": {
+      "type": "object",
+      "description": "Internal metadata appended by bakery(S4).bake() — not part of the probe(S2)-produced contract proper, but a real, load-bearing extension: runtime(S1) reads _bakery.snapshot_id to bind-mount the registered native base into a run's clone. Declared here (added 2026-07-18) because additionalProperties:false previously rejected bake()'s own output against this schema.",
+      "additionalProperties": false,
+      "properties": {
+        "base_name": { "type": "string", "description": "human label, e.g. jailrun-native-<plan_hash>" },
+        "snapshot_id": { "type": ["string", "null"], "description": "store.register_base() return value; null if the plan couldn't be auto-provisioned (e.g. it needs a build: recipe — see warnings)" },
+        "plan": { "type": "object", "description": "ProvisioningPlan.as_dict() — the resolved pkg/port/build steps" },
+        "warnings": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}
