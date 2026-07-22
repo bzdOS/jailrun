@@ -4,7 +4,9 @@
 # INTENT: front-door for the jailrun binary; keeps parsing logic isolated so engine.py
 #         and lifecycle.py have no argparse dependency and can be imported in tests
 # DEPENDENCIES: stdlib (argparse, sys, subprocess, json); runtime.engine.run;
-#               runtime.lifecycle.Lifecycled; no external tools invoked here
+#               runtime.engine._store_module/_load_manifest (explain IMAGE path);
+#               runtime.explain.render_explain; runtime.lifecycle.Lifecycled;
+#               no external tools invoked here
 # PUBLIC_API: main(argv) -> int
 # END_AI_HEADER
 
@@ -14,6 +16,7 @@ jailrun CLI — docker-run-compatible argument parser for the jailrun runtime.
 Entry point: `jailrun` dispatches to subcommands:
   jailrun run [FLAGS] IMAGE [CMD [ARGS...]]
   jailrun ps
+  jailrun explain [--manifest FILE | IMAGE] [--format text|json]
   jailrun version
 
 Design notes:
@@ -226,15 +229,78 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    # ---- explain --------------------------------------------------------
+    explain_p = sub.add_parser(
+        "explain",
+        help="Explain whether/how an image runs under jailrun",
+        description=(
+            "Answer 'will this image run under jailrun, how, and what would\n"
+            "make it better' by rendering the substitution manifest: which\n"
+            "binaries are native, which fall back to Linuxulator and why, and\n"
+            "the concrete pkg/port fix that would flip a given binary to native.\n"
+            "\n"
+            "Two ways to get a manifest:\n"
+            "  --manifest FILE   load a pre-produced JSON manifest from disk.\n"
+            "                    Works on any host (Linux or FreeBSD).\n"
+            "  IMAGE             resolve the manifest the same way `jailrun run`\n"
+            "                    does (resolve -> unpack -> clone -> probe/bakery).\n"
+            "                    FreeBSD-host only — needs the real store/probe/\n"
+            "                    bakery seams (ZFS, jail tooling)."
+        ),
+    )
+    explain_p.add_argument(
+        "--manifest",
+        dest="manifest",
+        metavar="FILE",
+        default=None,
+        help="Load a substitution manifest JSON file from disk instead of resolving IMAGE.",
+    )
+    explain_p.add_argument(
+        "--format",
+        dest="format",
+        choices=("text", "json"),
+        default="text",
+        help="Output format (default: text).",
+    )
+    explain_p.add_argument(
+        "image",
+        metavar="IMAGE",
+        nargs="?",
+        default=None,
+        help=(
+            "OCI image reference to resolve a manifest for. FreeBSD-host only "
+            "(requires the real store/probe/bakery seams). Omit if --manifest is given."
+        ),
+    )
+
     # ---- version ------------------------------------------------------------
     sub.add_parser(
         "version",
         help="Show jailrun version information",
     )
 
+    # ---- doctor ------------------------------------------------------------
+    doctor_p = sub.add_parser(
+        "doctor",
+        help="Inspect host and report jailrun readiness",
+        description=(
+            "Inspect the host and report jailrun readiness.\n"
+            "Checks for required tools (skopeo, bsdtar), kernel modules (linux64),\n"
+            "and FreeBSD-specific config (ZFS pool, racct, pkg trust keys).\n"
+            "Provides exact fix text on failure."
+        ),
+    )
+    doctor_p.add_argument(
+        "--format",
+        dest="format",
+        choices=("text", "json"),
+        default="text",
+        help="Output format: 'text' (default, human-readable) or 'json'.",
+    )
+
     # ---- jail lifecycle (delegated to bsdos_lifecycled) ---------------------
     for verb, helptext in (
-        ("freeze", "SIGSTOP a jail's processes (0% CPU, state stays in RAM)"),
+        ("freeze", "SIGSTOP a jail's processes (0%% CPU, state stays in RAM)"),
         ("thaw", "SIGCONT a frozen jail (instant resume)"),
         ("hibernate", "ZFS-snapshot + SIGSTOP a jail (RAM-light)"),
         ("restore", "Restore a hibernated/frozen jail"),
@@ -285,6 +351,65 @@ def _cmd_run(args: argparse.Namespace) -> int:
     return run(image_ref=args.image, cmd=args.cmd, opts=opts)
 
 
+# _cmd_explain:start
+#   purpose: obtain a substitution manifest (from --manifest FILE or by resolving
+#            IMAGE the same way `jailrun run` does) and print runtime.explain's
+#            rendering of it
+#   input:
+#     args: argparse.Namespace — parsed flags from the 'explain' subparser
+#           (manifest: str | None, format: 'text'|'json', image: str | None)
+#   output:
+#     exit_code: int — 0 on success; 1 if neither --manifest nor IMAGE was given,
+#                or if loading/resolving the manifest failed
+#   sideEffects:
+#     --manifest path: reads and json.load()s the given file from disk (Linux-safe,
+#       unit-tested path — no VM, no FreeBSD tools).
+#     IMAGE path (FreeBSD-host only): imports runtime.engine and calls its
+#       resolve -> unpack -> clone -> _load_manifest sequence, exactly what
+#       engine._run_async() does before assembling the native shadow layer —
+#       i.e. it touches the real store/probe/bakery seams (ZFS clone, probe scan,
+#       bakery provisioning plan). Not usable on a plain Linux dev host.
+#     Always: print(runtime.explain.render_explain(manifest, fmt=args.format)) to stdout.
+# _cmd_explain:end
+def _cmd_explain(args: argparse.Namespace) -> int:
+    """Dispatch to runtime.explain.render_explain(); return exit code."""
+    import json  # noqa: PLC0415
+    from runtime.explain import render_explain  # noqa: PLC0415
+
+    if args.manifest:
+        try:
+            with open(args.manifest, encoding="utf-8") as fh:
+                manifest = json.load(fh)
+        except OSError as exc:
+            print(f"error: could not read manifest file {args.manifest!r}: {exc}", file=sys.stderr)
+            return 1
+        except json.JSONDecodeError as exc:
+            print(f"error: {args.manifest!r} is not valid JSON: {exc}", file=sys.stderr)
+            return 1
+    elif args.image:
+        # FreeBSD-host only: reuses engine's own resolve -> unpack -> clone ->
+        # _load_manifest sequence (see engine._run_async's START_RESOLVE_AND_UNPACK
+        # / START_CLONE_ROOTFS / START_LOAD_MANIFEST blocks). Imported here, not at
+        # module level, so cli.py stays importable/testable on a plain Linux host
+        # even though this branch itself needs the real FreeBSD store/probe/bakery
+        # seams to do anything useful.
+        from runtime import engine  # noqa: PLC0415
+
+        image_id = engine._store_module.resolve(args.image)
+        snapshot_id = engine._store_module.unpack(image_id)
+        rootfs_path, _handle = engine._store_module.clone(snapshot_id)
+        manifest = engine._load_manifest(rootfs_path, args.image)
+    else:
+        print(
+            "error: jailrun explain needs either --manifest FILE or an IMAGE argument",
+            file=sys.stderr,
+        )
+        return 1
+
+    print(render_explain(manifest, fmt=args.format))
+    return 0
+
+
 # _cmd_ps:start
 #   purpose: print a stub container listing header and placeholder row to stdout
 #   input:
@@ -310,6 +435,25 @@ def _cmd_version(_args: argparse.Namespace) -> int:
     print("runtime: FreeBSD jails + ZFS (freebsd-host only)")
     print("host build: linux-host/Linux (design + scaffold)")
     return 0
+
+
+# _cmd_doctor:start
+#   purpose: run host readiness checks and print results to stdout
+#   input:
+#     args: argparse.Namespace — parsed flags from the 'doctor' subparser (format: 'text' or 'json')
+#   output:
+#     exit_code: int — 0 if all checks passed/skipped; 1 if any check failed
+#   sideEffects: calls runtime.doctor.run_checks() and runtime.doctor.render() to inspect host state;
+#                prints formatted results to stdout via print()
+# _cmd_doctor:end
+def _cmd_doctor(args: argparse.Namespace) -> int:
+    """Inspect host and report jailrun readiness; return exit code."""
+    from runtime.doctor import run_checks, render, exit_code_for_results  # noqa: PLC0415
+
+    results = run_checks()
+    output = render(results, fmt=args.format)
+    print(output)
+    return exit_code_for_results(results)
 
 
 # _cmd_lifecycle:start
@@ -354,8 +498,12 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_run(args)
     if args.subcommand == "ps":
         return _cmd_ps(args)
+    if args.subcommand == "explain":
+        return _cmd_explain(args)
     if args.subcommand == "version":
         return _cmd_version(args)
+    if args.subcommand == "doctor":
+        return _cmd_doctor(args)
     if args.subcommand in ("freeze", "thaw", "hibernate", "restore"):
         return _cmd_lifecycle(args.subcommand, args)
 

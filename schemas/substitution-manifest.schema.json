@@ -31,7 +31,11 @@
             "additionalProperties": false,
             "properties": {
               "provider": { "type": "string", "description": "pkg:<name> | port:<origin> | build:<recipe-id>" },
-              "artifact_path": { "type": ["string", "null"], "description": "resolved native binary path in the base (filled by bakery)" }
+              "artifact_path": { "type": ["string", "null"], "description": "resolved native binary path in the base (filled by bakery)" },
+              "verification": {
+                "enum": ["guessed", "exists", "runs", "behaves", "proven"],
+                "description": "L0-L4 trust ladder for this native substitution. Absent = unknown/weakest. guessed (L0) = provider/path derived from the binary name, never checked on a real host (probe(S2) always produces this). exists (L1) = the native artifact path was confirmed present on a real FreeBSD host (bakery(S4) bumps guessed->exists here). runs (L2) = a smoke command (e.g. --version) exited 0 inside a jail. behaves (L3) = a differential test vs the Linux original passed. proven (L4) = a real image end-to-end run exercised it. L2-L4 are produced by a future agent verification harness, not by probe or bakery."
+              }
             }
           },
           "syscalls_needed": { "type": "array", "items": { "type": "string" }, "default": [] },

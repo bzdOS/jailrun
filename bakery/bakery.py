@@ -573,20 +573,32 @@ def plan_to_provision_cmd(plan: ProvisioningPlan) -> str:
 # ---------------------------------------------------------------------------
 
 # fill_artifact_paths:start
-#   purpose: produce a deep-copy of the manifest with native.artifact_path set for every step in plan
+#   purpose: produce a deep-copy of the manifest with native.artifact_path set for every step in plan,
+#            bumping native.verification "guessed" -> "exists" when the resolved path is confirmed
+#            present on disk
 #   input:
 #     manifest: dict[str, Any] — original Substitution Manifest (not mutated)
 #     plan: ProvisioningPlan — resolved plan whose steps carry (kind, target) -> artifact_path mapping
 #   output:
-#     updated: dict[str, Any] — deep copy of manifest with native.artifact_path filled and status confirmed as "native"
-#   sideEffects: logs WARNING via logging.warning() for binaries whose provider has no resolved artifact in plan
+#     updated: dict[str, Any] — deep copy of manifest with native.artifact_path filled, status
+#              confirmed as "native", and native.verification bumped to "exists" wherever the
+#              filled artifact_path was confirmed present on disk (left as "guessed" otherwise —
+#              e.g. resolve_pkg's heuristic "guessing ..." fallback path, or a resolved path that
+#              simply isn't there yet)
+#   sideEffects: logs WARNING via logging.warning() for binaries whose provider has no resolved
+#                artifact in plan; stats each filled artifact_path via Path.exists() (read-only)
+#   rationale: this is L0->L1 of the verification ladder only (schemas/substitution-manifest.schema.json)
+#              — bakery never invents "runs"/"behaves"/"proven" (L2-L4); those come from a future
+#              agent verification harness that actually exercises the binary.
 def fill_artifact_paths(
     manifest: dict[str, Any],
     plan: ProvisioningPlan,
 ) -> dict[str, Any]:
     """
     Return a copy of manifest with native.artifact_path filled for every
-    resolved binary, and status confirmed as 'native'.
+    resolved binary, status confirmed as 'native', and native.verification
+    bumped 'guessed' -> 'exists' when the filled path is confirmed present
+    on disk.
     """
     # START_BUILD_RESOLVED_INDEX
     # Build a lookup: (kind, target) → artifact_path from the plan
@@ -623,6 +635,17 @@ def fill_artifact_paths(
             else:
                 native["artifact_path"] = resolved[key]
             binary["status"] = "native"  # confirm
+
+            # START_BUMP_VERIFICATION
+            # L0 ("guessed", stamped by probe(S2)) -> L1 ("exists") only when
+            # the filled path is actually confirmed present. resolve_pkg()'s
+            # heuristic "guessing ..." fallback (name not in PKG_ARTIFACTS)
+            # produces a path we have never confirmed, so it — same as any
+            # resolved path that just isn't there — leaves verification at
+            # "guessed". Never invent L2-L4 (runs/behaves/proven) here.
+            if Path(native["artifact_path"]).exists():
+                native["verification"] = "exists"
+            # END_BUMP_VERIFICATION
         else:
             log.warning(
                 "No resolved artifact for %s provider=%s",

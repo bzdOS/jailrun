@@ -421,16 +421,23 @@ def classify_role(path: Path, abi: str, elf_info: ELFInfo) -> str:
 #   input:
 #     name: str — basename of the Linux binary (case-insensitive lookup)
 #   output:
-#     native_block: dict | None — {"provider": "<pkg|port>:<name>", "artifact_path": None}
-#                                 if a provider is known; None otherwise
+#     native_block: dict | None — {"provider": "<pkg|port>:<name>", "artifact_path": None,
+#                                 "verification": "guessed"} if a provider is known;
+#                                 None otherwise
 #   sideEffects: none
+#   rationale: verification="guessed" (L0 of the schema's verification ladder) is
+#              stamped unconditionally here — at probe time a provider is always
+#              derived purely from the binary's name, never checked against a real
+#              FreeBSD host. bakery(S4) may bump this to "exists" (L1) once the
+#              artifact_path is confirmed present; higher levels (runs/behaves/proven)
+#              are only ever produced by a future agent verification harness.
 def propose_native(name: str) -> dict | None:
     """Return native block if we have a provider; else None."""
     key = name.lower()
     provider = PROVIDER_MAP.get(key)
     if provider is None:
         return None
-    return {"provider": provider, "artifact_path": None}
+    return {"provider": provider, "artifact_path": None, "verification": "guessed"}
 # propose_native:end
 
 
