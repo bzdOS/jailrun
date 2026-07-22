@@ -1,8 +1,9 @@
 # START_AI_HEADER
 # MODULE: providers/__init__.py
 # PURPOSE: load the hand-maintained substitution lookup tables (provider map, pkg/port
-#          artifact paths, multi-binary pkg set) from schema-validated JSON data files
-#          under providers/ instead of hard-coded Python dict/set literals.
+#          artifact paths, multi-binary pkg set, coreutils GNU/BSD flavor labels) from
+#          schema-validated JSON data files under providers/ instead of hard-coded
+#          Python dict/set literals.
 # INTENT: roadmap 0.3 — "the registry becomes data, not code". probe.py's PROVIDER_MAP
 #         and bakery.py's PKG_ARTIFACTS / PORT_ARTIFACTS / MULTI_BINARY_PKGS used to be
 #         hand-written dict/set literals inside those modules; this package is now the
@@ -12,9 +13,15 @@
 #         contributed JSON) rather than a code edit. The BuildRecipe/RECIPE_REGISTRY
 #         objects in bakery.py carry logic (pkg_deps/port_deps/status/notes), not just
 #         a plain lookup, and stay in code — only the plain dict/set tables moved.
+#         COREUTILS_FLAVOR (added 2026-07-22, see docs/GNU-VS-BSD-POLICY.md) is purely
+#         descriptive metadata about EXISTING PROVIDER_MAP entries for coreutils-class
+#         binaries (which flavor — gnu or bsd — the current mapping already resolves
+#         to); it does not change PROVIDER_MAP's contract and is NOT wired into
+#         probe.py or bakery.py yet (deliberately out of scope — see the doc).
 # DEPENDENCIES: stdlib only (json, pathlib)
 # PUBLIC_API: PROVIDER_MAP: dict[str, str]; PKG_ARTIFACTS: dict[str, str];
-#             PORT_ARTIFACTS: dict[str, str]; MULTI_BINARY_PKGS: frozenset[str]
+#             PORT_ARTIFACTS: dict[str, str]; MULTI_BINARY_PKGS: frozenset[str];
+#             COREUTILS_FLAVOR: dict[str, str]
 # END_AI_HEADER
 """
 providers/__init__.py — loads providers/*.json once at import time and exposes them
@@ -51,6 +58,7 @@ _provider_map_data = _load_json("provider-map.json")
 _pkg_artifacts_data = _load_json("pkg-artifacts.json")
 _port_artifacts_data = _load_json("port-artifacts.json")
 _multi_binary_pkgs_data = _load_json("multi-binary-pkgs.json")
+_coreutils_flavor_data = _load_json("coreutils-flavor.json")
 
 # PUBLIC_API — same shapes/types probe.py / bakery.py used to define inline.
 # Key: basename (lower-case) of the Linux binary.
@@ -67,4 +75,17 @@ PORT_ARTIFACTS: dict[str, str] = dict(_port_artifacts_data["artifacts"])
 # matching the package name (see bakery.fill_artifact_paths()).
 MULTI_BINARY_PKGS: frozenset[str] = frozenset(_multi_binary_pkgs_data["packages"])
 
-__all__ = ["PROVIDER_MAP", "PKG_ARTIFACTS", "PORT_ARTIFACTS", "MULTI_BINARY_PKGS"]
+# Descriptive metadata about EXISTING PROVIDER_MAP entries for coreutils-class binaries:
+# key: basename, already a key in PROVIDER_MAP. value: "gnu" | "bsd" — which flavor
+# PROVIDER_MAP's CURRENT mapping for that binary already resolves to. Additive-only:
+# does not change PROVIDER_MAP itself and is not (yet) consumed by probe.py/bakery.py.
+# See docs/GNU-VS-BSD-POLICY.md for the policy this backs and its current gaps.
+COREUTILS_FLAVOR: dict[str, str] = dict(_coreutils_flavor_data["flavors"])
+
+__all__ = [
+    "PROVIDER_MAP",
+    "PKG_ARTIFACTS",
+    "PORT_ARTIFACTS",
+    "MULTI_BINARY_PKGS",
+    "COREUTILS_FLAVOR",
+]

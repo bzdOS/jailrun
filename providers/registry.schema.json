@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://jailrun/providers/registry.schema.json",
   "title": "jailrun provider registry data files",
-  "description": "Validates the providers/*.json data files that hold the substitution lookup tables consumed by probe(S2) and bakery(S4): provider-map.json, pkg-artifacts.json, port-artifacts.json, multi-binary-pkgs.json. Each file's shape is one of the $defs below, picked by filename (see .github/scripts/validate_provider_data.py). schema_version is a plain integer today (bump only on a breaking shape change); values stay plain strings/lists for now, but the object wrapper leaves room for richer per-entry metadata (e.g. evidence/verification level) later without a format break.",
+  "description": "Validates the providers/*.json data files that hold the substitution lookup tables consumed by probe(S2) and bakery(S4): provider-map.json, pkg-artifacts.json, port-artifacts.json, multi-binary-pkgs.json, coreutils-flavor.json. Each file's shape is one of the $defs below, picked by filename (see .github/scripts/validate_provider_data.py). schema_version is a plain integer today (bump only on a breaking shape change); values stay plain strings/lists for now, but the object wrapper leaves room for richer per-entry metadata (e.g. evidence/verification level) later without a format break.",
   "$defs": {
     "provider_map": {
       "title": "provider-map.json",
@@ -72,12 +72,30 @@
           "uniqueItems": true
         }
       }
+    },
+    "coreutils_flavor": {
+      "title": "coreutils-flavor.json",
+      "description": "Descriptive metadata about EXISTING provider-map.json entries for coreutils-class binaries (classic Unix text/file utilities where GNU and BSD implementations have historically-known flag/behavior differences, per ROADMAP.md's 0.3 'Substitution policy per entry'). key: a binary basename that MUST already be a key in provider-map.json's `providers` object. value: which userland flavor provider-map.json's CURRENT mapping for that binary actually resolves to today (gnu = the provider string is a GNU-flavored port/pkg, e.g. pkg:gtar; bsd = base-system or a non-GNU port). This file does NOT add or change any binary->provider mapping — it only labels mappings that already exist. See docs/GNU-VS-BSD-POLICY.md.",
+      "type": "object",
+      "required": ["schema_version", "flavors"],
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": { "type": "integer", "minimum": 1 },
+        "flavors": {
+          "type": "object",
+          "description": "key: basename (lower-case) of the Linux binary, already present as a key in provider-map.json's providers map. value: gnu | bsd.",
+          "additionalProperties": {
+            "enum": ["gnu", "bsd"]
+          }
+        }
+      }
     }
   },
   "anyOf": [
     { "$ref": "#/$defs/provider_map" },
     { "$ref": "#/$defs/pkg_artifacts" },
     { "$ref": "#/$defs/port_artifacts" },
-    { "$ref": "#/$defs/multi_binary_pkgs" }
+    { "$ref": "#/$defs/multi_binary_pkgs" },
+    { "$ref": "#/$defs/coreutils_flavor" }
   ]
 }

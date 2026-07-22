@@ -2,7 +2,7 @@
 # START_AI_HEADER
 # MODULE: .github/scripts/validate_provider_data.py
 # PURPOSE: CI check — providers/*.json data files (PROVIDER_MAP, PKG_ARTIFACTS,
-#          PORT_ARTIFACTS, MULTI_BINARY_PKGS) must validate against
+#          PORT_ARTIFACTS, MULTI_BINARY_PKGS, COREUTILS_FLAVOR) must validate against
 #          providers/registry.schema.json, and the providers/ loader must expose
 #          them as the same objects probe.py/bakery.py consume, on every push.
 # INTENT: sibling to validate_manifest_schema.py's approach (same shape: build/load
@@ -43,6 +43,7 @@ FILE_TO_SCHEMA_DEF = {
     "pkg-artifacts.json": "pkg_artifacts",
     "port-artifacts.json": "port_artifacts",
     "multi-binary-pkgs.json": "multi_binary_pkgs",
+    "coreutils-flavor.json": "coreutils_flavor",
 }
 
 
@@ -61,16 +62,28 @@ def main() -> None:
     # START_SANITY_CHECK_LOADER
     # Import AFTER schema validation so a malformed JSON file fails with a clear
     # jsonschema error above, rather than an opaque loader traceback here.
-    from providers import MULTI_BINARY_PKGS, PKG_ARTIFACTS, PORT_ARTIFACTS, PROVIDER_MAP
+    from providers import (
+        COREUTILS_FLAVOR,
+        MULTI_BINARY_PKGS,
+        PKG_ARTIFACTS,
+        PORT_ARTIFACTS,
+        PROVIDER_MAP,
+    )
 
     assert isinstance(PROVIDER_MAP, dict) and len(PROVIDER_MAP) > 0, "PROVIDER_MAP is empty or wrong type"
     assert isinstance(PKG_ARTIFACTS, dict) and len(PKG_ARTIFACTS) > 0, "PKG_ARTIFACTS is empty or wrong type"
     assert isinstance(PORT_ARTIFACTS, dict) and len(PORT_ARTIFACTS) > 0, "PORT_ARTIFACTS is empty or wrong type"
     assert isinstance(MULTI_BINARY_PKGS, frozenset), "MULTI_BINARY_PKGS must be a frozenset"
+    assert isinstance(COREUTILS_FLAVOR, dict) and len(COREUTILS_FLAVOR) > 0, "COREUTILS_FLAVOR is empty or wrong type"
+    # Every coreutils-flavor.json key must point at a binary that actually exists in
+    # provider-map.json — this file only LABELS existing mappings, it never invents new ones.
+    orphans = [k for k in COREUTILS_FLAVOR if k not in PROVIDER_MAP]
+    assert not orphans, f"COREUTILS_FLAVOR has keys not present in PROVIDER_MAP: {orphans}"
     print(
         "OK: providers loader exposes non-empty PROVIDER_MAP "
         f"({len(PROVIDER_MAP)}), PKG_ARTIFACTS ({len(PKG_ARTIFACTS)}), "
-        f"PORT_ARTIFACTS ({len(PORT_ARTIFACTS)}), MULTI_BINARY_PKGS ({len(MULTI_BINARY_PKGS)})"
+        f"PORT_ARTIFACTS ({len(PORT_ARTIFACTS)}), MULTI_BINARY_PKGS ({len(MULTI_BINARY_PKGS)}), "
+        f"COREUTILS_FLAVOR ({len(COREUTILS_FLAVOR)})"
     )
     # END_SANITY_CHECK_LOADER
 
