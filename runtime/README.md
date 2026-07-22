@@ -194,11 +194,26 @@ see CHANGELOG.md "Fixed (live E2E debugging, 2026-07-19)" for the full list.
 3. **devfs ruleset** — `mount.devfs` in `jail.conf` may need an explicit
    `devfs_ruleset` on hardened FreeBSD configs; not hit in the esphome example
    run, but that run didn't specifically stress devfs-restricted configurations.
-4. **rctl action semantics beyond cputime** — `sigkill` is empirically confirmed
-   for `cputime`; `memoryuse`/`pcpu` use `sigkill` by analogy (same accumulating-
-   resource category) but aren't individually stress-tested yet, and
-   `readbps`/`writebps` use `throttle` (untested against real disk-saturating
-   input).
+4. ~~rctl action semantics beyond cputime~~ — individually stress-tested
+   2026-07-20 against deliberately-bad input on a FreeBSD dev host
+   (`kern.racct.enable=1` live). **Confirmed working**: `memoryuse:sigkill` (a doubling-string memory
+   bomb capped at 100m died, exit 247, around iteration 22-23 / ~130-260MB,
+   never reaching a 40-iteration "survived" marker); `maxproc:deny` (a loop
+   forking 50 background jobs under `maxproc:deny=10` stopped forking at
+   exactly 9, correctly refusing the 10th, counting the shell itself);
+   `writebps:throttle` (`writebps:throttle=5m` took 10.53s to write 50MB —
+   4.7MB/s, matching the limit — vs 0.01s / 4.6GB/s unthrottled, ~1000x
+   difference). **NOT confirmed / likely non-functional**: `pcpu:sigkill` — a
+   busy-loop under `pcpu:sigkill=10` ran 60s+ unaffected while `rctl -u` on the
+   live jail showed `pcpu=100` (kernel tracks usage correctly, 10x over
+   threshold) with no signal ever delivered. `cputime:sigkill` is the real
+   CPU-runaway backstop (confirmed, see engine.py's `DEFAULT_RCTL_RULES`
+   comment) — don't rely on `pcpu` for that. `readbps:throttle` — attempted a
+   read-side test but the file was still hot in ZFS ARC from having just been
+   written, so the fast result (6.5GB/s despite a 5m limit) is inconclusive,
+   not evidence of a problem; same mechanism as the confirmed `writebps`, low
+   risk, but worth a clean re-test (cold cache / file larger than ARC) before
+   fully trusting it.
 5. **ZFS pool path** — `run.freebsd.sh` (the hand-driven smoke script, not the
    real pipeline) assumes `zroot/jailrun`; the real path (`JAILRUN_ZPOOL` env,
    default `jailrun`) is what's actually proven.

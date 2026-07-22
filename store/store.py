@@ -151,6 +151,20 @@ def _get_zpool() -> str:
     return os.environ.get("JAILRUN_ZPOOL", "jailrun").strip()
 
 
+# _get_mountpoint_base: reads JAILRUN_MOUNTPOINT_BASE env var, returns plaindir
+# tree root (no validation; existence/writability checked at op time).
+# Needed when jailrun itself runs inside a jail that nullfs-binds a host
+# /var/jailrun in: nullfs cannot mount onto a path that is itself already
+# inside a nullfs mount (FreeBSD returns EDEADLK, "Resource deadlock
+# avoided") -- so a jailrun-in-jail deployment must point its own
+# images/bases/runs tree at a directory that is NATIVE to that jail's own
+# filesystem, not another nullfs bind, or every -v bind mount into a nested
+# run's rootfs (which lives under mountpoint_base) fails.
+def _get_mountpoint_base() -> str:
+    """Return the plaindir/ZFS-mountpoint tree root from JAILRUN_MOUNTPOINT_BASE; default '/var/jailrun'."""
+    return os.environ.get("JAILRUN_MOUNTPOINT_BASE", "/var/jailrun").strip()
+
+
 # ---------------------------------------------------------------------------
 # Exceptions
 # ---------------------------------------------------------------------------
@@ -266,17 +280,19 @@ class Store:
     #   input:
     #     pool: str | None — ZFS pool name override; None reads JAILRUN_ZPOOL
     #     oci_cache_dir: str | Path — host directory for skopeo OCI layout cache
-    #     mountpoint_base: str | Path — host directory root for ZFS mountpoints / plaindir trees
+    #     mountpoint_base: str | Path | None — host directory root for ZFS
+    #       mountpoints / plaindir trees; None reads JAILRUN_MOUNTPOINT_BASE
     #     umoci: bool — True = umoci layer unpacking; False = bsdtar fallback
     #     backend: str | None — backend override; None reads JAILRUN_STORE_BACKEND
     #   output:
     #     none (constructor)
-    #   sideEffects: none (reads env vars via _get_backend()/_get_zpool(); no filesystem ops)
+    #   sideEffects: none (reads env vars via _get_backend()/_get_zpool()/
+    #                _get_mountpoint_base(); no filesystem ops)
     def __init__(
         self,
         pool: str | None = None,
         oci_cache_dir: str | Path = "/var/cache/jailrun/oci",
-        mountpoint_base: str | Path = "/var/jailrun",
+        mountpoint_base: str | Path | None = None,
         umoci: bool = False,
         backend: str | None = None,
     ) -> None:
@@ -286,7 +302,7 @@ class Store:
 
         self.pool = (pool if pool is not None else _get_zpool()) if self.backend == BACKEND_ZFS else ""
         self.oci_cache_dir = Path(oci_cache_dir)
-        self.mountpoint_base = Path(mountpoint_base)
+        self.mountpoint_base = Path(mountpoint_base if mountpoint_base is not None else _get_mountpoint_base())
         self.use_umoci = umoci
 
         # Derived dataset/dir prefixes — no double-name: pool/images, not pool/jailrun/images
@@ -486,6 +502,41 @@ class Store:
         # plaindir: register_base() already returned the directory itself.
         return Path(snapshot_id)
     # base_mountpoint:end
+
+    # base_snapshot:start
+    #   purpose: resolve a pre-provisioned NATIVE base by human name to a
+    #            clone-source snapshot_id, for use as a run's ROOT rootfs
+    #            (the native-first FreeBSD-userland path — no OCI/skopeo, no
+    #            Linux shadow, no Linuxulator). Distinct from register_base(),
+    #            which is hash-keyed by provision recipe and mounted INTO a run;
+    #            this addresses a base by a stable name a caller already knows
+    #            (e.g. engine's `nativebase:freebsd-15.1`).
+    #   input:
+    #     name: str — base name, e.g. "freebsd-15.1"; sanitised like dataset names
+    #   output:
+    #     snapshot_id: str — ZFS '<bases_ds>/<safe>@snap' | plaindir '<bases_dir>/<safe>'
+    #   sideEffects: none (pure lookup); raises SnapshotNotFoundError if absent
+    def base_snapshot(self, name: str) -> str:
+        """Return the clone-source snapshot_id for a named native base.
+
+        Raises SnapshotNotFoundError if the base has not been provisioned yet
+        (create it once with base.txz extraction into <bases_dir>/<name>, or a
+        ZFS base dataset + @snap)."""
+        safe = _safe_zfs_name(name)
+        if self.backend == BACKEND_ZFS:
+            snapshot_id = f"{self._bases_ds}/{safe}@snap"
+            if not self._zfs_snapshot_exists(snapshot_id):
+                raise SnapshotNotFoundError(
+                    f"native base not provisioned: {name!r} (expected {snapshot_id})"
+                )
+            return snapshot_id
+        dest = Path(self._bases_ds) / safe
+        if not dest.is_dir():
+            raise SnapshotNotFoundError(
+                f"native base not provisioned: {name!r} (expected {dest})"
+            )
+        return str(dest)
+    # base_snapshot:end
 
     # clone:start
     #   purpose: create a writable CoW clone of a snapshot for one jail run
@@ -1039,10 +1090,15 @@ class Store:
         -----
         • Layer blobs are gzip-compressed tars stored under
           ``<oci_dir>/blobs/sha256/<digest>``.
-        • bsdtar on FreeBSD handles most tar features including hardlinks.  # UNVERIFIED
+        • bsdtar on FreeBSD handles hardlinks fine (confirmed 2026-07-20, real
+          esphome/esphome:2025.5 image).
         • Device node creation requires root; whiteout markers are regular files
           in the OCI layer, which bsdtar can extract unprivileged except for devices.
-        • xattr support via bsdtar depends on the libarchive build flags.    # UNVERIFIED
+        • xattrs are extracted with ``--no-xattrs`` (see below) -- Linux-only
+          xattrs like ``security.capability`` have no FreeBSD equivalent and
+          bsdtar-as-root treats a failure to restore them as fatal, aborting
+          the whole unpack otherwise (confirmed 2026-07-20 on ping's
+          cap_net_raw capability xattr).
         """
         # START_BSDTAR_MANIFEST_PARSE
         index_path = oci_dir / "index.json"
@@ -1071,10 +1127,26 @@ class Store:
                 tmp_path = Path(tmp)
 
                 # Extract layer into tmp
-                self._run([                      # UNVERIFIED: bsdtar on FreeBSD
+                #
+                # --no-xattrs: many real-world OCI layers carry Linux-only
+                # extended attributes (e.g. `security.capability` on
+                # capability-tagged binaries like /usr/bin/ping, granting
+                # cap_net_raw instead of setuid). bsdtar run as root (which
+                # jailrun always is, for jail creation) attempts to restore
+                # xattrs by default and treats a failure as fatal --
+                # "Cannot restore extended attributes: security.capability:
+                # Unknown error: -1" -- aborting the ENTIRE unpack even though
+                # the file content itself extracted fine. Confirmed live
+                # 2026-07-20 against esphome/esphome:2025.5's ping binary.
+                # FreeBSD has no equivalent capability model, so there's
+                # nothing meaningful to restore anyway -- safe to skip
+                # unconditionally rather than only as a root-vs-non-root
+                # default.
+                self._run([
                     "bsdtar", "-xf", str(layer_blob),
                     "-C", str(tmp_path),
                     "--no-same-owner",
+                    "--no-xattrs",
                 ], timeout=DEFAULT_EXTRACT_TIMEOUT_S)
 
                 # START_BSDTAR_OPAQUE_WHITEOUTS

@@ -6,6 +6,40 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); this project adh
 
 ## [0.1.0] - 2026-07-20
 
+### rctl limits individually stress-tested (2026-07-20)
+Closing a gap the 2026-07-19 run left open: `memoryuse`/`pcpu`/`maxproc`/
+`writebps` were only reasoned "by analogy" to the confirmed `cputime` case.
+Ran each in isolation against deliberately-bad input on a FreeBSD dev host
+(`kern.racct.enable=1` live, confirmed via `sysctl`):
+- `memoryuse:sigkill=100m` — CONFIRMED. A doubling-string memory bomb died
+  (exit 247) around iteration 22-23 (~130-260MB), never reaching a
+  40-iteration "survived" marker.
+- `maxproc:deny=10` — CONFIRMED. A loop forking 50 background jobs stopped
+  forking at exactly 9 (correctly refusing fork #10, counting the shell).
+- `writebps:throttle=5m` — CONFIRMED. 50MB write took 10.53s (4.7MB/s,
+  matching the limit) vs 0.01s / 4.6GB/s unthrottled — ~1000x difference.
+- `pcpu:sigkill=10` — **NOT CONFIRMED, likely non-functional.** A
+  single-threaded busy-loop ran 60s+ unaffected; `rctl -u` on the live jail
+  showed `pcpu=100` (kernel tracks usage correctly, 10x over the sigkill
+  threshold) with no signal ever delivered. `cputime:sigkill` remains the real
+  CPU-runaway backstop — `pcpu:sigkill` kept in `DEFAULT_RCTL_RULES` (harmless)
+  but should not be relied on or advertised as working. Root cause (FreeBSD
+  quirk vs a jailrun rule-string issue) not yet diagnosed.
+- `readbps:throttle` — attempted, inconclusive: the test file was still hot in
+  ZFS ARC from being written moments earlier, so the fast read result isn't
+  evidence either way. Same code path as the confirmed `writebps`; low risk,
+  but worth a clean (cold-cache) re-test before fully trusting it.
+
+Also: a batch of `--rm` jails from these tests appeared to leak (jail stayed
+in `jls` after the run) — turned out to be a **test-harness artifact**, not a
+real bug: wrapping the whole `jailrun run` invocation in an external `timeout`
+SIGTERMs the Python process before its own `finally`-block teardown can run.
+Re-running the same scenario with jailrun's own `--timeout` flag (which stops
+just the jexec'd command, not the CLI process) left zero stray jails. Real
+usage (a caller with its own timeout/process-group handling) is
+extremely unlikely to reproduce this externally-SIGTERM'd shape, but worth
+being aware of if `--rm` cleanup ever looks flaky again.
+
 ### First real end-to-end run (2026-07-19)
 - **`jailrun run esphome/esphome:stable esphome compile blink.yaml` succeeded end
   to end through jailrun's own code** (`runtime.cli` → `runtime.engine` →

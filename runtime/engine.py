@@ -123,6 +123,28 @@ MANIFEST_FILENAME = "substitution-manifest.json"
 NATIVE_BIN_DIR = "/jailrun-native/bin"
 
 
+# _is_jailed:start
+#   purpose: detect whether jailrun ITSELF is running inside a FreeBSD jail
+#            (nested-jail deployment, e.g. jailrun running inside a host
+#            application's production jail). Governs the devfs ruleset choice
+#            in _build_jail_conf below.
+#   output: bool — True if security.jail.jailed reports a nonzero value.
+def _is_jailed() -> bool:
+    """Return True when this process is itself running inside a jail."""
+    try:
+        import subprocess  # noqa: PLC0415
+        out = subprocess.run(
+            ["sysctl", "-n", "security.jail.jailed"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return out.returncode == 0 and out.stdout.strip() not in ("", "0")
+    except Exception:
+        # Fail closed toward the bare-host behavior (ruleset 4). If we truly
+        # were jailed and misdetected, jail creation fails loudly with EPERM
+        # rather than silently mounting an unrestricted devfs.
+        return False
+
+
 # _load_manifest:start
 #   purpose: resolve the substitution manifest for image_ref, using the cached
 #            file inside the rootfs clone or running probe+bakery on a cache miss
@@ -381,6 +403,35 @@ def _build_jail_conf(
         "    mount.devfs;",                     # /dev inside jail
     ]
 
+    # [NESTED-JAIL devfs] When jailrun runs on the bare host, `mount.devfs`
+    # defaults to devfs_ruleset 4 (devfsrules_jail), which correctly restricts
+    # the run-jail's /dev to a safe minimal set (null/zero/random/...). But
+    # applying a devfs ruleset is a HOST privilege: a process inside a jail
+    # gets EPERM ("Operation not permitted") the moment jail(8) runs
+    # `mount -t devfs -oruleset=4`, so nested jail creation fails outright.
+    # Verified live on a nested production jail deployment 2026-07-22. When we
+    # are ourselves jailed the only ruleset we may select is 0, so force it
+    # explicitly.
+    #
+    # [SECURITY -- KNOWN GAP] ruleset 0 is the UNRESTRICTED devfs: a fresh
+    # devfs mounted inside a jail exposes the FULL host device set (mem, kmem,
+    # raw disks, ...), NOT the parent jail's already-restricted /dev — devfs
+    # does not inherit the parent's ruleset. Jail policy still denies the
+    # privileged operations on most of those nodes, but their mere presence is
+    # a hardening gap that MUST be closed before running genuinely untrusted
+    # code (e.g. user-uploaded C++ compiled through a nested jailrun). Closing
+    # it requires host cooperation (host-mounted ruleset-4 devfs, or
+    # recreating the parent jail with a child-capping devfs setup) and is
+    # tracked as a separate gate.
+    if _is_jailed():
+        lines.append("    devfs_ruleset = 0;")   # only selectable ruleset when nested
+        log.warning(
+            "jailrun is running inside a jail: nested run-jail /dev uses the "
+            "UNRESTRICTED devfs ruleset 0 (host devfs cannot delegate ruleset 4 "
+            "from within a jail). Safe for trusted workloads; HARDEN before "
+            "running untrusted code."
+        )
+
     if allow_raw_sockets:
         lines.append("    allow.raw_sockets;")
 
@@ -509,18 +560,35 @@ async def _run_subprocess(
 # no-op for them. Confirmed live 2026-07-19: a jail with
 # `cputime:deny=2` ran a CPU-bound busy-loop straight through to the OUTER
 # --timeout (30s) completely unaffected; the SAME rule with `cputime:sigkill=2`
-# correctly killed it (exit 247 = terminated by SIGKILL) within ~2s. Only
-# maxproc keeps `deny` here; sigkill for accumulating usage, throttle for I/O
-# rate (the semantically correct rctl action for each — sigkill is empirically
-# confirmed for cputime specifically; memoryuse/pcpu are the same accumulating
-# category reasoned by analogy, not yet individually stress-tested).
+# correctly killed it (exit 247 = terminated by SIGKILL) within ~2s.
+#
+# [STRESS-TESTED 2026-07-20, individually, against deliberately-bad input on
+# a FreeBSD dev host with kern.racct.enable=1 live] memoryuse:sigkill — CONFIRMED: a
+# doubling-string memory bomb capped at memoryuse:sigkill=100m died (exit 247)
+# around iteration 22-23 (~130-260MB), never reaching the 40-iteration
+# "SURVIVED_ALL" marker. maxproc:deny — CONFIRMED: with maxproc:deny=10, a loop
+# forking 50 background sleeps stopped forking after exactly 9 (correctly
+# refusing the 10th, counting the shell itself). writebps:throttle — CONFIRMED:
+# a 50MB dd write took 10.53s under writebps:throttle=5m (4.7MB/s, matching the
+# limit) vs 0.01s / 4.6GB/s unthrottled — ~1000x difference.
+#
+# pcpu:sigkill — NOT CONFIRMED, likely non-functional as configured. A
+# single-threaded busy-loop under pcpu:sigkill=10 (10x below actual usage) ran
+# for 60s+ without being killed; `rctl -u` on the live jail showed
+# `pcpu=100` (kernel IS tracking usage correctly, 10x over the sigkill
+# threshold) yet no signal was ever delivered. Kept in the defaults below
+# (harmless — cputime:sigkill is the real backstop against runaway CPU use;
+# pcpu adds nothing today but costs nothing either) but do NOT rely on it, and
+# don't advertise CPU-runaway protection as "pcpu-enforced" anywhere. Root
+# cause not diagnosed (FreeBSD version quirk vs a jailrun rule-string bug) —
+# worth a closer look before ever leaning on it specifically.
 DEFAULT_RCTL_RULES: tuple[str, ...] = (
-    "memoryuse:sigkill=8g",  # aggregate resident memory across the whole jail
-    "pcpu:sigkill=400",      # up to ~4 cores continuously (parallel ninja/make)
-    "maxproc:deny=512",      # admission control — correctly refuses a NEW fork
-    "cputime:sigkill=3600",  # aggregate CPU-seconds backstop against runaway loops
+    "memoryuse:sigkill=8g",  # aggregate resident memory across the whole jail — CONFIRMED working (see above)
+    "pcpu:sigkill=400",      # up to ~4 cores continuously — NOT CONFIRMED, likely inert (see above); cputime below is the real backstop
+    "maxproc:deny=512",      # admission control — CONFIRMED working (see above)
+    "cputime:sigkill=3600",  # aggregate CPU-seconds backstop against runaway loops — CONFIRMED working (see above)
     "readbps:throttle=200m", # disk read throughput ceiling (rate — throttle, not kill)
-    "writebps:throttle=200m",# disk write throughput ceiling
+    "writebps:throttle=200m",# disk write throughput ceiling — CONFIRMED working (see above)
 )
 
 
@@ -817,13 +885,31 @@ async def _run_async(
     # START_RESOLVE_AND_UNPACK
     # ------------------------------------------------------------------
     # 1. Resolve + unpack image → ZFS snapshot
+    #
+    # Native-first FreeBSD path: an image_ref of the form `nativebase:<name>`
+    # selects a pre-provisioned FreeBSD-userland base (see store.base_snapshot)
+    # as the run's ROOT rootfs, instead of pulling a Linux OCI image. This is
+    # the correct base for running native FreeBSD toolchains (e.g. the esphome
+    # venv python + xtensa toolchain): a Linux image (alpine/debian) has no
+    # /libexec/ld-elf.so.1 or FreeBSD libc, so a native FreeBSD binary cannot
+    # exec there at all. In this mode there is nothing to shadow (binaries are
+    # already native) and no Linux ABI to load, so steps 3/4a/4d are skipped.
     # ------------------------------------------------------------------
-    log.info("resolving image: %s", image_ref)
-    image_id = _store_module.resolve(image_ref)
-    log.info("image_id: %s", image_id)
+    native_base: str | None = None
+    if image_ref.startswith("nativebase:"):
+        native_base = image_ref.split(":", 1)[1]
 
-    snapshot_id = _store_module.unpack(image_id)
-    log.info("snapshot: %s", snapshot_id)
+    if native_base:
+        log.info("native FreeBSD base: %s", native_base)
+        snapshot_id = _store_module.base_snapshot(native_base)
+        log.info("snapshot: %s", snapshot_id)
+    else:
+        log.info("resolving image: %s", image_ref)
+        image_id = _store_module.resolve(image_ref)
+        log.info("image_id: %s", image_id)
+
+        snapshot_id = _store_module.unpack(image_id)
+        log.info("snapshot: %s", snapshot_id)
     # END_RESOLVE_AND_UNPACK
 
     # START_CLONE_ROOTFS
@@ -843,12 +929,20 @@ async def _run_async(
         # ------------------------------------------------------------------
         # 3. Load substitution manifest (probe+bakery, or cache)
         # ------------------------------------------------------------------
-        manifest = _load_manifest(rootfs_path, image_ref)
-        log.info(
-            "manifest loaded: %d binaries, linuxulator.required=%s",
-            len(manifest.get("binaries", [])),
-            manifest.get("linuxulator", {}).get("required"),
-        )
+        if native_base:
+            # Native FreeBSD base: binaries are already native, so there is
+            # nothing to probe or shadow and no Linux ABI to load. An empty
+            # manifest makes every downstream step (bakery mount, shadow
+            # symlinks, _needs_linuxulator) a correct no-op.
+            manifest = {}
+            log.info("native base %s: skipping manifest/shadow/Linuxulator", native_base)
+        else:
+            manifest = _load_manifest(rootfs_path, image_ref)
+            log.info(
+                "manifest loaded: %d binaries, linuxulator.required=%s",
+                len(manifest.get("binaries", [])),
+                manifest.get("linuxulator", {}).get("required"),
+            )
         # END_LOAD_MANIFEST
 
         # START_ASSEMBLE_SHADOW_AND_ENV
