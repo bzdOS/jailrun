@@ -6,7 +6,8 @@
 # DEPENDENCIES: stdlib (argparse, sys, sqlite3, json); runtime.engine.run;
 #               runtime.engine._store_module/_load_manifest (explain IMAGE path);
 #               runtime.explain.render_explain; runtime.lifecycle.Lifecycled;
-#               runtime.rundb.RunDB (ps); runtime.doctor (doctor); runtime.gc (gc)
+#               runtime.rundb.RunDB (ps); runtime.doctor (doctor); runtime.gc (gc);
+#               runtime.scan.scan_image/aggregate/render (scan)
 # PUBLIC_API: main(argv) -> int
 # END_AI_HEADER
 
@@ -17,6 +18,7 @@ Entry point: `jailrun` dispatches to subcommands:
   jailrun run [FLAGS] IMAGE [CMD [ARGS...]]
   jailrun ps [--all]
   jailrun explain [--manifest FILE | IMAGE] [--format text|json]
+  jailrun scan IMAGE [IMAGE...] [--format text|json]
   jailrun doctor [--format text|json]
   jailrun gc [--fix] [--format text|json]
   jailrun version
@@ -283,6 +285,37 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    # ---- scan -----------------------------------------------------------
+    scan_p = sub.add_parser(
+        "scan",
+        help="Aggregate native-vs-linuxulator compat stats across multiple images",
+        description=(
+            "Run jailrun's own probe() against one or more images and report\n"
+            "an aggregate 'how native is this image' summary — the same\n"
+            "per-binary data `jailrun explain` renders for ONE image, rolled\n"
+            "up across a batch: total images, overall native-binary %\n"
+            "across all of them, and images ranked by native % (highest and\n"
+            "lowest).\n"
+            "\n"
+            "FreeBSD-host only (needs the real store/probe seams, same as\n"
+            "`jailrun explain IMAGE`). A bad/unreachable image reference is\n"
+            "reported per-image and does not abort scanning the rest."
+        ),
+    )
+    scan_p.add_argument(
+        "images",
+        metavar="IMAGE",
+        nargs="+",
+        help="One or more OCI image references, e.g. alpine:3.19 debian:12",
+    )
+    scan_p.add_argument(
+        "--format",
+        dest="format",
+        choices=("text", "json"),
+        default="text",
+        help="Output format (default: text).",
+    )
+
     # ---- version ------------------------------------------------------------
     sub.add_parser(
         "version",
@@ -453,6 +486,50 @@ def _cmd_explain(args: argparse.Namespace) -> int:
     return 0
 
 
+# _cmd_scan:start
+#   purpose: run scan_image() against every given image ref, catching and
+#            reporting per-image failures individually, then aggregate() +
+#            render() the successful summaries
+#   input:
+#     args: argparse.Namespace — parsed flags from the 'scan' subparser
+#           (images: list[str], format: 'text'|'json')
+#   output:
+#     exit_code: int — 0 if at least one image scanned successfully (or the
+#                list was empty of failures); 1 if EVERY given image failed
+#                to scan (nothing to aggregate/report)
+#   sideEffects: imports runtime.scan lazily (matching the _cmd_explain/
+#                _cmd_doctor/_cmd_gc pattern); calls scan_image(image) for
+#                each image, which touches the real store/probe seams
+#                (FreeBSD-host only — see runtime.scan.scan_image); one
+#                image's failure (bad ref, seam not built on this host, etc.)
+#                is caught and printed to stderr, never aborting the rest;
+#                prints the aggregate()+render() report to stdout via print()
+def _cmd_scan(args: argparse.Namespace) -> int:
+    """Scan one or more images, aggregate, and print the compat-matrix report."""
+    from runtime.scan import scan_image, aggregate, render  # noqa: PLC0415
+
+    summaries: list[dict] = []
+    failures = 0
+    for image in args.images:
+        try:
+            summaries.append(scan_image(image))
+        except (Exception, SystemExit) as exc:  # noqa: BLE001 — one bad image must never abort
+            # the batch. SystemExit is included because probe.probe() raises it
+            # directly (not a plain Exception) when a rootfs is unexpectedly
+            # missing; every other realistic failure (NotImplementedError from
+            # the store/probe mocks on a non-FreeBSD host, subprocess/OSError
+            # from a real store, bad image ref from skopeo) is a normal Exception.
+            failures += 1
+            print(f"error: could not scan {image!r}: {exc}", file=sys.stderr)
+
+    result = aggregate(summaries)
+    print(render(result, fmt=args.format))
+
+    if not summaries and failures:
+        return 1
+    return 0
+
+
 # _render_ps_table:start
 #   purpose: format run-state rows as a docker-ps-style table (pure, no I/O)
 #   input:
@@ -606,8 +683,9 @@ def _cmd_lifecycle(verb: str, args: argparse.Namespace) -> int:
 #   output:
 #     exit_code: int — 0 on success; 1 on unknown subcommand or handler failure
 #   sideEffects: calls _build_parser() to construct the argument parser; delegates to
-#                _cmd_run / _cmd_ps / _cmd_version / _cmd_lifecycle which each have their
-#                own side effects; argparse may write to stderr and call sys.exit on bad args
+#                _cmd_run / _cmd_ps / _cmd_explain / _cmd_scan / _cmd_doctor / _cmd_gc /
+#                _cmd_version / _cmd_lifecycle which each have their own side effects;
+#                argparse may write to stderr and call sys.exit on bad args
 # main:end
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
@@ -619,6 +697,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_ps(args)
     if args.subcommand == "explain":
         return _cmd_explain(args)
+    if args.subcommand == "scan":
+        return _cmd_scan(args)
     if args.subcommand == "version":
         return _cmd_version(args)
     if args.subcommand == "doctor":
