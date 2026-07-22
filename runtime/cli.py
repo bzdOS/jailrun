@@ -4,7 +4,7 @@
 # INTENT: front-door for the jailrun binary; keeps parsing logic isolated so engine.py
 #         and lifecycle.py have no argparse dependency and can be imported in tests
 # DEPENDENCIES: stdlib (argparse, sys, sqlite3, json); runtime.engine.run;
-#               runtime.engine._store_module/_load_manifest (explain IMAGE path);
+#               runtime.engine._store_module/_load_manifest (explain IMAGE path, pull);
 #               runtime.explain.render_explain; runtime.lifecycle.Lifecycled;
 #               runtime.rundb.RunDB (ps, logs); runtime.doctor (doctor); runtime.gc (gc);
 #               runtime.scan.scan_image/aggregate/render (scan)
@@ -16,6 +16,7 @@ jailrun CLI — docker-run-compatible argument parser for the jailrun runtime.
 
 Entry point: `jailrun` dispatches to subcommands:
   jailrun run [FLAGS] IMAGE [CMD [ARGS...]]
+  jailrun pull IMAGE [--authfile PATH] [--creds USER:PASS]
   jailrun ps [--all]
   jailrun logs JAIL_NAME
   jailrun explain [--manifest FILE | IMAGE] [--format text|json]
@@ -86,6 +87,26 @@ def _volume_spec(s: str) -> tuple[str, str, bool]:
             )
         readonly = flag == "ro"
     return (host, ctr, readonly)
+
+
+# _creds_pair: parses "USER:PASS" string into (user, password) tuple; raises ArgumentTypeError on bad input (pure, no IO)
+def _creds_pair(s: str) -> tuple[str, str]:
+    """
+    Parse USER:PASS into (user, password). Raises ArgumentTypeError on bad input.
+
+    Splits on the FIRST ':' only (matching skopeo's own --creds parsing) —
+    the user portion cannot contain ':', but the password can.
+    """
+    if ":" not in s:
+        raise argparse.ArgumentTypeError(
+            f"--creds expects USER:PASS, got: {s!r}"
+        )
+    user, _, password = s.partition(":")
+    if not user:
+        raise argparse.ArgumentTypeError(
+            f"--creds user must not be empty, got: {s!r}"
+        )
+    return (user, password)
 
 
 # ---------------------------------------------------------------------------
@@ -222,6 +243,45 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="CMD",
         nargs=argparse.REMAINDER,
         help="Command (and arguments) to run inside the jail.",
+    )
+
+    # ---- pull -----------------------------------------------------------
+    pull_p = sub.add_parser(
+        "pull",
+        help="Pre-warm the local image cache (resolve + unpack), no jail run",
+        description=(
+            "Resolve (skopeo copy) and unpack (umoci/bsdtar extraction + zfs\n"
+            "snapshot or plaindir sentinel) IMAGE into the local store cache,\n"
+            "without creating a jail or running any command — the same first\n"
+            "two steps `jailrun run IMAGE ...` takes before it ever touches\n"
+            "jail(8). Useful to pre-warm a batch of images ahead of time, or\n"
+            "to separate network-pull time from the rest of a run when timing\n"
+            "something. FreeBSD-host only (needs the real store seam: skopeo,\n"
+            "umoci-or-bsdtar, zfs-or-plaindir)."
+        ),
+    )
+    pull_p.add_argument(
+        "image",
+        metavar="IMAGE",
+        help="OCI image reference, e.g. alpine:3.19 or alpine@sha256:<digest>",
+    )
+    pull_p.add_argument(
+        "--authfile",
+        dest="authfile",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Path to a docker/podman-style JSON registry credentials file "
+            "(skopeo --authfile). Overridden by --creds if both are given."
+        ),
+    )
+    pull_p.add_argument(
+        "--creds",
+        dest="creds",
+        metavar="USER:PASS",
+        type=_creds_pair,
+        default=None,
+        help="Registry credentials as USER:PASS (skopeo --creds). Takes precedence over --authfile.",
     )
 
     # ---- ps -----------------------------------------------------------------
@@ -443,6 +503,60 @@ def _cmd_run(args: argparse.Namespace) -> int:
         # (no limit at all) instead of falling back to the documented default.
         opts["timeout"] = args.timeout
     return run(image_ref=args.image, cmd=args.cmd, opts=opts)
+
+
+# _cmd_pull:start
+#   purpose: pre-warm the store's local cache for IMAGE — resolve() (skopeo
+#            copy) then unpack() (umoci/bsdtar extraction + zfs snapshot or
+#            plaindir sentinel) — WITHOUT creating a jail or running a
+#            command, so an operator can separate network-pull time from the
+#            rest of a run, or warm a batch of images ahead of time
+#   input:
+#     args: argparse.Namespace — parsed flags from the 'pull' subparser
+#           (image: str, authfile: str | None, creds: tuple[str, str] | None)
+#   output:
+#     exit_code: int — 0 on success; 1 on any resolve()/unpack() failure —
+#                always a clean one-line message, never a raw traceback
+#   sideEffects: imports runtime.engine lazily (same pattern _cmd_explain's
+#                IMAGE path already uses) and calls
+#                engine._store_module.resolve(image, auth=creds,
+#                authfile=authfile) then engine._store_module.unpack(image_id)
+#                — the real store/skopeo/umoci-or-bsdtar/zfs-or-plaindir seam
+#                (FreeBSD-host only for anything past argument parsing).
+#                auth/authfile kwargs are only passed through when the
+#                corresponding flag was actually given, so a plain
+#                `jailrun pull IMAGE` with neither flag calls resolve(image)
+#                with the exact same call shape as before registry auth
+#                support existed. Deliberately stops at unpack() — does NOT
+#                call clone(): clone() creates a writable per-run dataset that
+#                only a matching destroy() cleans up, and `pull` has no run to
+#                attach that lifetime to; calling it here would leak an
+#                unreferenced run dataset every time an operator pre-warms the
+#                cache. unpack()'s snapshot is the right "fully cached, ready
+#                for the next `jailrun run`" stopping point, and it is
+#                idempotent (re-pulling an already-cached image is a fast
+#                no-op, per unpack()'s own contract). Prints a one-line
+#                success/failure message to stdout/stderr via print().
+# _cmd_pull:end
+def _cmd_pull(args: argparse.Namespace) -> int:
+    """Pre-warm the store cache for IMAGE (resolve + unpack); return exit code."""
+    from runtime import engine  # noqa: PLC0415  (import inside fn for testability)
+
+    resolve_kwargs: dict = {}
+    if args.creds is not None:
+        resolve_kwargs["auth"] = args.creds
+    if args.authfile is not None:
+        resolve_kwargs["authfile"] = args.authfile
+
+    try:
+        image_id = engine._store_module.resolve(args.image, **resolve_kwargs)
+        engine._store_module.unpack(image_id)
+    except Exception as exc:  # noqa: BLE001 — CLI reports a clean message, never a raw traceback
+        print(f"jailrun pull: failed to pull {args.image!r}: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"jailrun pull: {args.image} -> {image_id}")
+    return 0
 
 
 # _cmd_explain:start
@@ -745,9 +859,10 @@ def _cmd_lifecycle(verb: str, args: argparse.Namespace) -> int:
 #   output:
 #     exit_code: int — 0 on success; 1 on unknown subcommand or handler failure
 #   sideEffects: calls _build_parser() to construct the argument parser; delegates to
-#                _cmd_run / _cmd_ps / _cmd_logs / _cmd_explain / _cmd_scan / _cmd_doctor /
-#                _cmd_gc / _cmd_version / _cmd_lifecycle which each have their own side
-#                effects; argparse may write to stderr and call sys.exit on bad args
+#                _cmd_run / _cmd_pull / _cmd_ps / _cmd_logs / _cmd_explain / _cmd_scan /
+#                _cmd_doctor / _cmd_gc / _cmd_version / _cmd_lifecycle which each have
+#                their own side effects; argparse may write to stderr and call sys.exit
+#                on bad args
 # main:end
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
@@ -755,6 +870,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.subcommand == "run":
         return _cmd_run(args)
+    if args.subcommand == "pull":
+        return _cmd_pull(args)
     if args.subcommand == "ps":
         return _cmd_ps(args)
     if args.subcommand == "logs":

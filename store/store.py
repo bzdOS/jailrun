@@ -73,6 +73,16 @@ Old layout used  <pool>/jailrun/…  which would produce "jailrun/jailrun" when
 pool=jailrun.  Layout is now  <pool>/images | <pool>/bases | <pool>/runs
 so JAILRUN_ZPOOL=jailrun → jailrun/images (clean, no double-name).
 
+Registry auth (roadmap 0.5)
+----------------------------
+JAILRUN_REGISTRY_AUTHFILE (default unset) — path to a docker/podman-style JSON
+registry credentials file; if set and the file exists, resolve() passes it to
+skopeo as ``--authfile <path>``.  This is a process-wide default; a specific
+resolve() call can override it with the keyword-only ``auth`` (explicit
+``(user, password)`` tuple → ``--creds``) or ``authfile`` (explicit path)
+parameters — see resolve()'s own contract comment for the full precedence
+rule.  Credentials never appear in logs (see _redact_argv()).
+
 Design decisions (see README.md for rationale):
   • skopeo copy docker://… oci:<oci_dir>:<tag>  with --override-os linux
   • umoci raw unpack --image <oci_dir>:<tag> <rootfs_dir>  for layer application
@@ -173,6 +183,14 @@ def _get_zpool() -> str:
 def _get_mountpoint_base() -> str:
     """Return the plaindir/ZFS-mountpoint tree root from JAILRUN_MOUNTPOINT_BASE; default '/var/jailrun'."""
     return os.environ.get("JAILRUN_MOUNTPOINT_BASE", "/var/jailrun").strip()
+
+
+# _get_registry_authfile: reads JAILRUN_REGISTRY_AUTHFILE env var, returns string path
+# (may be empty; existence is checked by the caller, not here — same "no validation at
+# read time" style as _get_zpool()/_get_mountpoint_base())
+def _get_registry_authfile() -> str:
+    """Return the registry authfile path from JAILRUN_REGISTRY_AUTHFILE; default '' (none)."""
+    return os.environ.get("JAILRUN_REGISTRY_AUTHFILE", "").strip()
 
 
 # ---------------------------------------------------------------------------
@@ -393,17 +411,61 @@ class Store:
     #   purpose: pull an OCI image from a Docker registry into the local OCI layout cache
     #            and return its content-addressed image_id
     #   input:
-    #     image_ref: str — Docker image reference, e.g. "debian:bookworm" or "registry/repo:tag"
+    #     image_ref: str — Docker image reference, e.g. "debian:bookworm",
+    #                "registry/repo:tag", or a digest pin "name@sha256:<64-hex>"
+    #     auth: tuple[str, str] | None — keyword-only, default None. Explicit
+    #           (user, password) credentials for THIS call; passed to skopeo as
+    #           '--creds <user>:<password>'. Highest precedence (see rationale).
+    #     authfile: str | None — keyword-only, default None. Explicit path to a
+    #           docker/podman-style JSON credentials file for THIS call; passed
+    #           to skopeo as '--authfile <path>' if the file exists. Used when
+    #           auth is None; falls back to the JAILRUN_REGISTRY_AUTHFILE env
+    #           var when authfile is also None (see _build_registry_auth_args).
     #   output:
     #     image_id: str — sha256 hex of sorted layer digests; stable key for unpack()
-    #   sideEffects: runs 'skopeo copy --override-os linux docker://<image_ref>
-    #                oci:<oci_cache_dir>/<safe_name>:latest' (network + disk write);
-    #                creates oci_cache_dir/<safe_name>/ directory if absent;
-    #                holds an exclusive fcntl.flock on <oci_cache_dir>/locks/<safe
-    #                image_ref>.lock for the full body (see _image_lock) so two
-    #                Store instances racing the SAME image_ref serialize instead of
-    #                both writing into the same oci_dir at once
-    def resolve(self, image_ref: str) -> str:
+    #   sideEffects: runs 'skopeo copy --override-os linux [--creds <user>:<pass> |
+    #                --authfile <path>] docker://<image_ref>
+    #                oci:<oci_cache_dir>/<safe_name>-<hash16>:latest' (network + disk
+    #                write); creates the oci_dir directory if absent; holds an
+    #                exclusive fcntl.flock on <oci_cache_dir>/locks/<safe image_ref>.lock
+    #                for the full body (see _image_lock) so two Store instances racing
+    #                the SAME image_ref serialize instead of both writing into the same
+    #                oci_dir at once; NEVER logs the auth/authfile credential value
+    #                itself (see _redact_argv — only the exact '--creds user:pass'
+    #                argv element is masked; '--authfile <path>' is not sensitive, the
+    #                path is not a secret)
+    #   rationale (auth precedence): explicit `auth` > explicit `authfile` param >
+    #             JAILRUN_REGISTRY_AUTHFILE env var > no auth at all (today's
+    #             unchanged behavior). Each more specific source simply overrides
+    #             the more general one — nothing here merges/combines them. `auth`
+    #             wins outright because a caller that went to the trouble of
+    #             handing THIS resolve() call THESE credentials clearly wants THIS
+    #             pull authenticated with THOSE creds, regardless of what default
+    #             authfile happens to be configured (env var) or passed (authfile
+    #             param). Between the two authfile sources, the explicit parameter
+    #             (e.g. a `jailrun pull --authfile PATH` CLI flag naming a file for
+    #             THIS invocation) is more specific than the env var (a process-wide
+    #             ambient default used by callers with no per-call auth surface,
+    #             e.g. engine.py's automatic resolve() during `jailrun run`).
+    #   rationale (digest pinning, name@sha256:<hex>): image_ref is passed through
+    #             to skopeo completely unmodified ('docker://<image_ref>') — skopeo/
+    #             containers-image already verifies the digest of whatever manifest
+    #             it fetches against the digest the caller asked for as an inherent
+    #             part of the OCI/Docker-distribution digest-fetch codepath (fetching
+    #             `.../manifests/sha256:X` is only valid if the returned content's own
+    #             sha256 IS X); a mismatch there is a skopeo-level failure, not
+    #             something resolve() needs to reimplement. What digest pinning DOES
+    #             need from this layer is a collision-safe cache directory name so
+    #             two different image_refs (in particular two different
+    #             name@sha256:<digest> pins of the same repo) can never resolve to
+    #             the SAME oci_dir — see _oci_dir_for()'s own rationale.
+    def resolve(
+        self,
+        image_ref: str,
+        *,
+        auth: tuple[str, str] | None = None,
+        authfile: str | None = None,
+    ) -> str:
         """
         Ensure ``image_ref`` is present in the local OCI cache and return its
         content-addressed ``image_id`` (sha256 of ordered layer digests).
@@ -412,12 +474,18 @@ class Store:
 
             skopeo copy \\
                 --override-os linux \\
+                [--creds <user>:<password> | --authfile <path>] \\
                 docker://<image_ref> \\
-                oci:<oci_cache_dir>/<safe_name>:latest
+                oci:<oci_cache_dir>/<safe_name>-<hash16>:latest
 
         The ``--override-os linux`` flag is essential on FreeBSD: without it
         skopeo would request a FreeBSD manifest which most registries do not
         carry, and the copy fails.   # UNVERIFIED (only relevant on FreeBSD)
+
+        Registry auth: see the auth-precedence rationale in the contract
+        comment above ``auth`` beats ``authfile`` beats
+        ``JAILRUN_REGISTRY_AUTHFILE`` beats no auth. The credential value
+        itself is never written to any log line (see ``_redact_argv``).
 
         Concurrency: two ``jailrun run`` processes resolving the SAME
         ``image_ref`` at once would otherwise both run ``skopeo copy`` into the
@@ -440,13 +508,22 @@ class Store:
             tag = "latest"
             oci_dest = f"oci:{oci_dir}:{tag}"
 
+            auth_args, redact = _build_registry_auth_args(auth, authfile)
+
             log.info("resolve: pulling %s -> %s", image_ref, oci_dest)
+            run_kwargs: dict = {"timeout": DEFAULT_NETWORK_TIMEOUT_S}
+            if redact:
+                # Only pass `redact` when there's actually something to mask —
+                # keeps the call shape identical to before this feature existed
+                # for every no-auth resolve() (the overwhelming common case).
+                run_kwargs["redact"] = redact
             self._run([
                 "skopeo", "copy",
                 "--override-os", "linux",   # UNVERIFIED: FreeBSD needs this flag
+                *auth_args,
                 f"docker://{image_ref}",
                 oci_dest,
-            ], timeout=DEFAULT_NETWORK_TIMEOUT_S)
+            ], **run_kwargs)
 
             image_id = self._compute_image_id(oci_dir, tag)
 
@@ -1322,11 +1399,45 @@ class Store:
     # OCI / content-addressing helpers
     # ------------------------------------------------------------------
 
-    # _oci_dir_for: maps image_ref to a sanitised cache subdirectory path (pure, no IO)
+    # _oci_dir_for:start
+    #   purpose: map image_ref to a sanitised, COLLISION-SAFE cache subdirectory
+    #            path (pure, no IO)
+    #   input:
+    #     image_ref: str — docker image reference, e.g. "alpine:3.19",
+    #                "registry.example/repo:tag", or a digest pin
+    #                "alpine@sha256:<64-hex>"
+    #   output:
+    #     Path — oci_cache_dir / "<human-readable-prefix>-<16-hex-suffix>"
+    #   sideEffects: none (pure path computation)
+    #   rationale: the human-readable prefix alone (every char outside
+    #              [a-zA-Z0-9._-] replaced by '_') is NOT collision-safe by
+    #              itself — the separator characters that actually distinguish
+    #              two refs (':', '/', '@') all collapse to the SAME '_', so two
+    #              syntactically different refs can sanitise to an IDENTICAL
+    #              string (e.g. "repo@sha256:<hex>" and "repo:sha256_<hex>" both
+    #              become "repo_sha256_<hex>"). Two different images sharing one
+    #              oci_dir would mean the second resolve() silently overwrites
+    #              the first's ":latest" tag entry in index.json — exactly the
+    #              failure digest pinning exists to rule out (a caller who
+    #              pinned a digest must never silently get a different image).
+    #              Appending a 16-hex sha256(image_ref) suffix makes the
+    #              directory name collision-safe by construction: it depends on
+    #              the FULL original string, not a lossy character
+    #              substitution, so any two distinct image_ref values (whatever
+    #              separators they use) land in distinct directories. This
+    #              covers the general case; two different name@sha256:<digest>
+    #              pins of the SAME repo were already safe under the old
+    #              scheme too (the 64-hex digest itself passes through the
+    #              substitution untouched, so the human-readable prefixes
+    #              already differed) — but the general guarantee is worth
+    #              having rather than relying on that being true for every
+    #              possible ref shape.
     def _oci_dir_for(self, image_ref: str) -> Path:
         """Return the OCI cache directory path for an image reference."""
         safe = re.sub(r"[^a-zA-Z0-9._-]", "_", image_ref)
-        return self.oci_cache_dir / safe
+        disambiguator = hashlib.sha256(image_ref.encode()).hexdigest()[:16]
+        return self.oci_cache_dir / f"{safe}-{disambiguator}"
+    # _oci_dir_for:end
 
     # _find_oci_for_image_id:start
     #   purpose: locate the OCI layout directory in the local cache that matches image_id
@@ -1518,12 +1629,21 @@ class Store:
     #              (default DEFAULT_LOCAL_TIMEOUT_S — see call sites for network/
     #              provision overrides; a hung fetch or wedged
     #              build must be killable, never left to hang forever)
+    #     redact: tuple[str, ...] — exact argv element values (e.g. a
+    #             '--creds user:pass' string) to mask as '***REDACTED***' in
+    #             every log line / StoreError message this call emits. Default
+    #             () — no-op, identical to the pre-existing behavior. The REAL
+    #             subprocess still receives the unredacted *cmd* unchanged; only
+    #             what gets logged/raised is affected. See resolve()'s auth
+    #             handling — this is the only call site that ever passes a
+    #             non-empty value.
     #   output:
     #     result: subprocess.CompletedProcess
     #   sideEffects: spawns subprocess via subprocess.run (capture_output=True);
     #                logs command at DEBUG; logs stderr at ERROR on failure;
     #                raises StoreError if returncode != 0, on timeout, or if the
-    #                binary itself cannot be spawned (OSError)
+    #                binary itself cannot be spawned (OSError); NEVER logs or
+    #                raises with any value listed in `redact`
     def _run(
         self,
         cmd: list[str],
@@ -1531,6 +1651,7 @@ class Store:
         input_: bytes | None = None,
         timeout: float | None = DEFAULT_LOCAL_TIMEOUT_S,
         env: dict[str, str] | None = None,
+        redact: tuple[str, ...] = (),
     ) -> subprocess.CompletedProcess:
         """
         Run *cmd*, raise StoreError on non-zero exit, timeout, or spawn failure.
@@ -1539,8 +1660,14 @@ class Store:
         env, if given, is merged over a copy of the current process environment
         (not a replacement) — used by register_base() to hand the base's own
         mountpoint to provision_cmd via JAILRUN_BASE_ROOT (see plan_to_provision_cmd).
+
+        redact, if given, masks the listed exact argv values (e.g. a skopeo
+        `--creds user:pass` string) out of every log line and StoreError
+        message built here — see resolve()'s registry-auth handling. The
+        subprocess itself always runs with the real, unredacted *cmd*.
         """
-        log.debug("run: %s", shlex.join(cmd))
+        log_cmd = _redact_argv(cmd, redact) if redact else cmd
+        log.debug("run: %s", shlex.join(log_cmd))
         full_env = {**os.environ, **env} if env else None
         try:
             result = subprocess.run(
@@ -1552,22 +1679,22 @@ class Store:
                 env=full_env,
             )
         except subprocess.TimeoutExpired as exc:
-            log.error("command timed out after %ss: %s", timeout, shlex.join(cmd))
+            log.error("command timed out after %ss: %s", timeout, shlex.join(log_cmd))
             raise StoreError(
-                f"Command timed out after {timeout}s: {shlex.join(cmd)}"
+                f"Command timed out after {timeout}s: {shlex.join(log_cmd)}"
             ) from exc
         except OSError as exc:
-            log.error("command failed to start: %s: %s", shlex.join(cmd), exc)
-            raise StoreError(f"Command failed to start: {shlex.join(cmd)}: {exc}") from exc
+            log.error("command failed to start: %s: %s", shlex.join(log_cmd), exc)
+            raise StoreError(f"Command failed to start: {shlex.join(log_cmd)}: {exc}") from exc
         if result.returncode != 0:
             log.error(
                 "command failed (rc=%d): %s\nstderr: %s",
                 result.returncode,
-                shlex.join(cmd),
+                shlex.join(log_cmd),
                 result.stderr.decode(errors="replace"),
             )
             raise StoreError(
-                f"Command failed (rc={result.returncode}): {shlex.join(cmd)}"
+                f"Command failed (rc={result.returncode}): {shlex.join(log_cmd)}"
             )
         return result
     # _run:end
@@ -1663,6 +1790,84 @@ def _safe_zfs_name(s: str) -> str:
     except '-' and '_' with '_'.
     """
     return re.sub(r"[^a-zA-Z0-9._-]", "_", s)
+
+
+# _build_registry_auth_args:start
+#   purpose: decide which skopeo auth flag (if any) Store.resolve() should pass,
+#            given the call's explicit auth/authfile arguments and the
+#            JAILRUN_REGISTRY_AUTHFILE env var fallback; also report exactly
+#            what must be redacted from any log line built from the resulting
+#            argv, so a credential value is never written to a log or exception
+#            message
+#   input:
+#     auth: tuple[str, str] | None — explicit (user, password) pair passed to
+#           Store.resolve(); highest precedence when given (see rationale)
+#     authfile: str | None — explicit authfile path passed to Store.resolve()
+#           (e.g. threaded from a `jailrun pull --authfile PATH` CLI flag);
+#           used only when auth is None
+#   output:
+#     tuple[list[str], tuple[str, ...]] — (extra skopeo argv fragment to splice
+#           into the `skopeo copy` command, values to redact from any log line
+#           built from the final argv — see _redact_argv). Both empty when
+#           neither auth, authfile, nor the env var apply — identical to the
+#           behavior before registry auth support existed.
+#   sideEffects: reads JAILRUN_REGISTRY_AUTHFILE via _get_registry_authfile()
+#                ONLY when both auth and authfile are None; checks file
+#                existence via Path.is_file() for whichever authfile candidate
+#                is chosen (authfile param or env var) — a set-but-missing
+#                authfile is silently ignored (same "soft default" as an unset
+#                env var), never raised as an error here
+#   rationale: precedence is auth (explicit creds — most specific, the caller
+#              went out of its way to hand THIS call THESE credentials) >
+#              authfile parameter (explicit file for THIS call, e.g. a CLI
+#              flag) > JAILRUN_REGISTRY_AUTHFILE env var (process-wide ambient
+#              default for callers with no per-call auth surface, e.g.
+#              engine.py's automatic resolve() during `jailrun run`) > no auth
+#              at all. Each more specific source overrides the more general
+#              one; nothing here merges/combines them (e.g. auth is never
+#              combined with an authfile — skopeo itself treats --creds and
+#              --authfile as alternatives, not additive).
+def _build_registry_auth_args(
+    auth: tuple[str, str] | None,
+    authfile: str | None,
+) -> tuple[list[str], tuple[str, ...]]:
+    """Return (extra skopeo argv, values-to-redact-from-logs) for registry auth."""
+    if auth is not None:
+        user, password = auth
+        creds = f"{user}:{password}"
+        return ["--creds", creds], (creds,)
+
+    candidate = authfile if authfile is not None else _get_registry_authfile()
+    if candidate and Path(candidate).is_file():
+        return ["--authfile", candidate], ()
+
+    return [], ()
+# _build_registry_auth_args:end
+
+
+# _redact_argv:start
+#   purpose: build a display-safe copy of an argv list with credential values
+#            masked, for logging/error-message purposes ONLY — never affects
+#            the real subprocess argv, which always runs unredacted
+#   input:
+#     cmd: list[str] — original argv
+#     redact: tuple[str, ...] — exact argv element values to mask (e.g. the
+#             literal "user:pass" string that follows a '--creds' flag)
+#   output:
+#     list[str] — copy of cmd with any element EXACTLY matching a redact value
+#             replaced by "***REDACTED***"; cmd itself is never mutated
+#   sideEffects: none (pure)
+#   rationale: exact-match (not substring) replacement — the redact value is
+#              always a single, whole argv element (subprocess argv is never
+#              shell-joined before this point), so exact match cannot
+#              accidentally clip an unrelated argument that merely CONTAINS
+#              the credential string as a substring
+def _redact_argv(cmd: list[str], redact: tuple[str, ...]) -> list[str]:
+    """Return a copy of cmd with any element in `redact` masked, for logging only."""
+    if not redact:
+        return list(cmd)
+    return ["***REDACTED***" if part in redact else part for part in cmd]
+# _redact_argv:end
 
 
 # _rm_rf:start
