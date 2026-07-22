@@ -31,6 +31,7 @@ Run with pytest:
 
 import contextlib
 import json
+import os
 import tempfile
 from pathlib import Path
 
@@ -104,11 +105,15 @@ async def _fake_run_subprocess(argv, *, check=True, timeout=None):  # noqa: ARG0
 # shape the real _stream_jexec raises on its jexec-timeout path (see
 # engine._stream_jexec's own docstring/rationale — it already SIGKILLs the
 # process and removes the jail itself before raising).
-async def _stream_jexec_success(jail_name, cmd, *, conf_path=None, env, workdir, timeout=None):  # noqa: ARG001
+# log_file=None accepted (and ignored) here: _run_async always passes it as a
+# keyword arg now (the already-open log file object, or None — see
+# engine._open_log_file()); these fakes don't exercise the real teeing logic,
+# only that the plumbing accepts the extra kwarg without breaking.
+async def _stream_jexec_success(jail_name, cmd, *, conf_path=None, env, workdir, timeout=None, log_file=None):  # noqa: ARG001
     return 7  # distinctive nonzero code so assertions can't pass by accident
 
 
-async def _stream_jexec_timeout(jail_name, cmd, *, conf_path=None, env, workdir, timeout=None):  # noqa: ARG001
+async def _stream_jexec_timeout(jail_name, cmd, *, conf_path=None, env, workdir, timeout=None, log_file=None):  # noqa: ARG001
     raise RuntimeError(f"jexec in jail {jail_name} timed out after {timeout}s; jail removed")
 
 
@@ -130,8 +135,8 @@ class _FakeRunDB:
     def __init__(self, path=None) -> None:  # noqa: ARG002
         pass
 
-    def record_start(self, jail_name, image, image_digest, dataset) -> None:
-        _FakeRunDB.CALL_LOG.append(("start", jail_name, image, image_digest, dataset))
+    def record_start(self, jail_name, image, image_digest, dataset, log_path=None) -> None:
+        _FakeRunDB.CALL_LOG.append(("start", jail_name, image, image_digest, dataset, log_path))
 
     def record_exit(self, jail_name, status, exit_code) -> None:
         _FakeRunDB.CALL_LOG.append(("exit", jail_name, status, exit_code))
@@ -148,7 +153,7 @@ class _BrokenRunDB:
     def __init__(self, path=None) -> None:  # noqa: ARG002
         pass
 
-    def record_start(self, jail_name, image, image_digest, dataset) -> None:  # noqa: ARG002
+    def record_start(self, jail_name, image, image_digest, dataset, log_path=None) -> None:  # noqa: ARG002
         raise TypeError("simulated rundb corruption (record_start)")
 
     def record_exit(self, jail_name, status, exit_code) -> None:  # noqa: ARG002
@@ -173,23 +178,33 @@ class _BrokenRunDB:
 #     rootfs_dir: str — real tmp directory used as the fake clone's rootfs
 #     handle_id: str — fed to _FakeStore/_FakeHandle; drives the expected
 #                jail_name ("jailrun-<handle_id>")
+#     log_dir: str | None — if given, sets JAILRUN_LOG_DIR for the duration so
+#              engine._get_log_dir()/_open_log_file() write real log files
+#              under a throwaway tmp dir instead of the real default
+#              (/var/log/jailrun) — same "never touch the real default path"
+#              discipline test_rundb.py already applies to JAILRUN_DB. None
+#              (default) leaves JAILRUN_LOG_DIR untouched.
 #   output: yields the _FakeStore instance in use
 #   sideEffects: mutates engine._store_module/_run_subprocess/_stream_jexec and
 #                rundb_module.RunDB for the duration of the block; ALWAYS
-#                restores the originals in a finally, even on exception
+#                restores the originals (and the JAILRUN_LOG_DIR env var) in a
+#                finally, even on exception
 @contextlib.contextmanager
-def _patched_engine(*, stream_jexec_fn, rundb_class, rootfs_dir, handle_id="testhandle"):
+def _patched_engine(*, stream_jexec_fn, rundb_class, rootfs_dir, handle_id="testhandle", log_dir=None):
     fake_store = _FakeStore(rootfs_dir, handle_id)
 
     orig_store = engine._store_module
     orig_run_subprocess = engine._run_subprocess
     orig_stream_jexec = engine._stream_jexec
     orig_rundb_class = rundb_module.RunDB
+    orig_log_dir_env = os.environ.get("JAILRUN_LOG_DIR")
 
     engine._store_module = fake_store
     engine._run_subprocess = _fake_run_subprocess
     engine._stream_jexec = stream_jexec_fn
     rundb_module.RunDB = rundb_class
+    if log_dir is not None:
+        os.environ["JAILRUN_LOG_DIR"] = log_dir
 
     try:
         yield fake_store
@@ -198,6 +213,11 @@ def _patched_engine(*, stream_jexec_fn, rundb_class, rootfs_dir, handle_id="test
         engine._run_subprocess = orig_run_subprocess
         engine._stream_jexec = orig_stream_jexec
         rundb_module.RunDB = orig_rundb_class
+        if log_dir is not None:
+            if orig_log_dir_env is None:
+                os.environ.pop("JAILRUN_LOG_DIR", None)
+            else:
+                os.environ["JAILRUN_LOG_DIR"] = orig_log_dir_env
 # _patched_engine:end
 
 
@@ -206,36 +226,44 @@ def _patched_engine(*, stream_jexec_fn, rundb_class, rootfs_dir, handle_id="test
 # ---------------------------------------------------------------------------
 
 # CONTRACT: on a normal successful run, record_start fires once (right after
-# `jail -c` succeeds) with the real jail_name/image/image_digest/dataset, and
-# record_exit fires once afterward with status "exited" and the real exit_code
-# jexec produced.
+# `jail -c` succeeds) with the real jail_name/image/image_digest/dataset AND
+# the log_path engine.py computed (<JAILRUN_LOG_DIR>/<jail_name>.log — see
+# engine._get_log_dir()), and record_exit fires once afterward with status
+# "exited" and the real exit_code jexec produced.
 def test_success_path_records_start_and_exited():
-    """Normal run: record_start then record_exit(status='exited', real exit_code)."""
+    """Normal run: record_start (with log_path) then record_exit(status='exited', real exit_code)."""
     _FakeRunDB.CALL_LOG.clear()
-    with tempfile.TemporaryDirectory() as rootfs_dir:
+    with tempfile.TemporaryDirectory() as rootfs_dir, tempfile.TemporaryDirectory() as log_dir:
         with _patched_engine(
             stream_jexec_fn=_stream_jexec_success,
             rundb_class=_FakeRunDB,
             rootfs_dir=rootfs_dir,
             handle_id="handle-success",
+            log_dir=log_dir,
         ):
             rc = engine.run("alpine:3.19", ["/bin/true"], {"rm": False})
 
-    assert rc == 7
-    assert len(_FakeRunDB.CALL_LOG) == 2
+        assert rc == 7
+        assert len(_FakeRunDB.CALL_LOG) == 2
 
-    kind, jail_name, image, image_digest, dataset = _FakeRunDB.CALL_LOG[0]
-    assert kind == "start"
-    assert jail_name == "jailrun-handle-success"
-    assert image == "alpine:3.19"
-    assert image_digest == "fake-snapshot-id"
-    assert dataset == "jailrun/runs/handle-success"
+        kind, jail_name, image, image_digest, dataset, log_path = _FakeRunDB.CALL_LOG[0]
+        assert kind == "start"
+        assert jail_name == "jailrun-handle-success"
+        assert image == "alpine:3.19"
+        assert image_digest == "fake-snapshot-id"
+        assert dataset == "jailrun/runs/handle-success"
+        expected_log_path = os.path.join(log_dir, "jailrun-handle-success.log")
+        assert log_path == expected_log_path
+        # _open_log_file() really opened this file (the fake _stream_jexec
+        # never writes to it, but the open+create itself already proves the
+        # real _run_async plumbing ran, not just a hardcoded string).
+        assert os.path.exists(expected_log_path)
 
-    kind2, jail_name2, status, exit_code = _FakeRunDB.CALL_LOG[1]
-    assert kind2 == "exit"
-    assert jail_name2 == "jailrun-handle-success"
-    assert status == "exited"
-    assert exit_code == 7
+        kind2, jail_name2, status, exit_code = _FakeRunDB.CALL_LOG[1]
+        assert kind2 == "exit"
+        assert jail_name2 == "jailrun-handle-success"
+        assert status == "exited"
+        assert exit_code == 7
     print("PASS test_success_path_records_start_and_exited")
 
 
@@ -247,7 +275,7 @@ def test_success_path_records_start_and_exited():
 def test_timeout_path_records_killed_with_none_exit_code():
     """jexec-timeout path: record_start then record_exit(status='killed', exit_code=None), exception still propagates."""
     _FakeRunDB.CALL_LOG.clear()
-    with tempfile.TemporaryDirectory() as rootfs_dir:
+    with tempfile.TemporaryDirectory() as rootfs_dir, tempfile.TemporaryDirectory() as log_dir:
         raised = False
         try:
             with _patched_engine(
@@ -255,6 +283,7 @@ def test_timeout_path_records_killed_with_none_exit_code():
                 rundb_class=_FakeRunDB,
                 rootfs_dir=rootfs_dir,
                 handle_id="handle-killed",
+                log_dir=log_dir,
             ):
                 engine.run("alpine:3.19", ["/bin/sleep", "300"], {"rm": False, "timeout": 1})
         except RuntimeError:
@@ -265,6 +294,7 @@ def test_timeout_path_records_killed_with_none_exit_code():
     kind, jail_name = _FakeRunDB.CALL_LOG[0][0], _FakeRunDB.CALL_LOG[0][1]
     assert kind == "start"
     assert jail_name == "jailrun-handle-killed"
+    assert _FakeRunDB.CALL_LOG[0][5] == os.path.join(log_dir, "jailrun-handle-killed.log")
 
     kind2, jail_name2, status, exit_code = _FakeRunDB.CALL_LOG[1]
     assert kind2 == "exit"
@@ -280,17 +310,56 @@ def test_timeout_path_records_killed_with_none_exit_code():
 # the jailed command's real exit code, exactly as if RunDB weren't wired in.
 def test_broken_rundb_never_breaks_a_run():
     """A RunDB that raises TypeError on every call still lets the run complete normally."""
-    with tempfile.TemporaryDirectory() as rootfs_dir:
+    with tempfile.TemporaryDirectory() as rootfs_dir, tempfile.TemporaryDirectory() as log_dir:
         with _patched_engine(
             stream_jexec_fn=_stream_jexec_success,
             rundb_class=_BrokenRunDB,
             rootfs_dir=rootfs_dir,
             handle_id="handle-broken-rundb",
+            log_dir=log_dir,
         ):
             rc = engine.run("alpine:3.19", ["/bin/true"], {"rm": False})
 
     assert rc == 7, "a broken RunDB must not change the real jailed exit code"
     print("PASS test_broken_rundb_never_breaks_a_run")
+
+
+# CONTRACT: a log-file open() that raises (simulating a broken/failing
+# log-file-write mechanism — e.g. disk full, permission denied) must NEVER
+# break a real run either — engine.run() must still complete and return the
+# jailed command's real exit code, exactly like the "broken rundb never
+# breaks a run" test above proves for record_start/record_exit. The run also
+# falls back to log_path=None (see _run_async's log-file-setup): a path
+# nothing was ever written to must not be recorded as if it were real.
+def test_broken_log_file_open_never_breaks_a_run():
+    """A log-file open() that raises still lets the run complete normally, with log_path=None recorded."""
+    _FakeRunDB.CALL_LOG.clear()
+    orig_open_log_file = engine._open_log_file
+
+    def _raising_open_log_file(log_path):  # noqa: ARG001
+        raise OSError("simulated: disk full / permission denied")
+
+    engine._open_log_file = _raising_open_log_file
+    try:
+        with tempfile.TemporaryDirectory() as rootfs_dir, tempfile.TemporaryDirectory() as log_dir:
+            with _patched_engine(
+                stream_jexec_fn=_stream_jexec_success,
+                rundb_class=_FakeRunDB,
+                rootfs_dir=rootfs_dir,
+                handle_id="handle-broken-log",
+                log_dir=log_dir,
+            ):
+                rc = engine.run("alpine:3.19", ["/bin/true"], {"rm": False})
+    finally:
+        engine._open_log_file = orig_open_log_file
+
+    assert rc == 7, "a broken log-file open() must not change the real jailed exit code"
+    assert len(_FakeRunDB.CALL_LOG) == 2
+    kind, jail_name, image, image_digest, dataset, log_path = _FakeRunDB.CALL_LOG[0]
+    assert kind == "start"
+    assert jail_name == "jailrun-handle-broken-log"
+    assert log_path is None, "log open failure means no persisted log_path is recorded"
+    print("PASS test_broken_log_file_open_never_breaks_a_run")
 
 
 # ---------------------------------------------------------------------------
@@ -301,6 +370,7 @@ TESTS = [
     test_success_path_records_start_and_exited,
     test_timeout_path_records_killed_with_none_exit_code,
     test_broken_rundb_never_breaks_a_run,
+    test_broken_log_file_open_never_breaks_a_run,
 ]
 
 

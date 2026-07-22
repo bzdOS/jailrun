@@ -7,8 +7,8 @@
 #         runs, independent of engine.py so it can land without touching the
 #         in-flight engine.py track (see NOTE below)
 # DEPENDENCIES: stdlib only (sqlite3, os, logging, datetime)
-# PUBLIC_API: RunDB (class) — record_start(), record_exit(), list_runs();
-#             DEFAULT_DB_PATH (str constant)
+# PUBLIC_API: RunDB (class) — record_start(), record_exit(), list_runs(),
+#             get_log_path(); DEFAULT_DB_PATH (str constant)
 # END_AI_HEADER
 
 # START_INVARIANTS
@@ -26,6 +26,12 @@
 #   single sqlite3 connection: a new RunDB(path=':memory:') is a new, empty
 #   database. Tests must reuse one RunDB instance across calls to see their
 #   own writes.
+# - log_path is a column added AFTER the table already existed in the wild
+#   (there is no migration system in this project) — _get_conn() upgrades any
+#   pre-existing db in place via `ALTER TABLE runs ADD COLUMN log_path TEXT`,
+#   swallowing ONLY the specific "duplicate column name" error sqlite3 raises
+#   when the column is already there. Any other ALTER TABLE failure (e.g. a
+#   genuinely corrupt db) still propagates — see _get_conn().
 # END_INVARIANTS
 
 """
@@ -52,7 +58,13 @@ DB path resolution (RunDB.__init__):
 Schema (single table, lazily created on first use):
   runs(jail_name TEXT PRIMARY KEY, image TEXT, image_digest TEXT, dataset TEXT,
        status TEXT CHECK(status IN ('running','exited','killed')),
-       exit_code INTEGER, started_at TEXT, ended_at TEXT)
+       exit_code INTEGER, started_at TEXT, ended_at TEXT, log_path TEXT)
+
+log_path (added after the table already existed — see _get_conn()'s ALTER
+TABLE migration below) records the path of the captured stdout/stderr log
+file for a run (see runtime/engine.py's _open_log_file()/_get_log_dir()),
+so `jailrun logs <jail_name>` can retrieve it after the fact. NULL for runs
+that predate this column, or whose log file could not be opened.
 """
 
 from __future__ import annotations
@@ -75,9 +87,18 @@ CREATE TABLE IF NOT EXISTS runs (
     status       TEXT CHECK(status IN ('running', 'exited', 'killed')),
     exit_code    INTEGER,
     started_at   TEXT,
-    ended_at     TEXT
+    ended_at     TEXT,
+    log_path     TEXT
 )
 """
+
+# log_path was added after runs already shipped without it, and this project
+# has no migration system — so any db file created by an older jailrun (or by
+# this same CREATE TABLE IF NOT EXISTS before this column existed) needs an
+# in-place ALTER TABLE to gain the column. sqlite3 raises OperationalError
+# ("duplicate column name: log_path") if the column is already present, which
+# _get_conn() catches (and ONLY that specific message) — see _get_conn().
+_ALTER_ADD_LOG_PATH_SQL = "ALTER TABLE runs ADD COLUMN log_path TEXT"
 
 
 # _now_iso:start
@@ -113,14 +134,20 @@ class RunDB:
 
     # _get_conn:start
     #   purpose: return the lazily-opened, cached sqlite3 connection for this
-    #            instance, creating the parent directory and the schema on
-    #            first use
+    #            instance, creating the parent directory and the schema (and
+    #            upgrading an older pre-log_path schema in place) on first use
     #   input: none (uses self.path)
     #   output: conn: sqlite3.Connection — open connection, row_factory=sqlite3.Row
     #   sideEffects: on first call only — os.makedirs(parent dir, exist_ok=True)
     #                unless self.path == ':memory:'; sqlite3.connect(self.path);
-    #                CREATE TABLE IF NOT EXISTS runs (...); caches the connection
-    #                on self._conn for reuse (required for ':memory:' to persist
+    #                CREATE TABLE IF NOT EXISTS runs (...) (brand-new dbs already
+    #                get log_path from this); then best-effort `ALTER TABLE runs
+    #                ADD COLUMN log_path TEXT` to upgrade a db file created
+    #                before this column existed — sqlite3's "duplicate column
+    #                name" OperationalError (the column already being there,
+    #                the overwhelmingly common case) is caught and ignored; any
+    #                OTHER OperationalError re-raises. Caches the connection on
+    #                self._conn for reuse (required for ':memory:' to persist
     #                writes across calls on the same instance).
     #                Raises OSError/sqlite3.Error on failure (mkdir/connect/DDL) —
     #                callers decide whether to swallow it (see class invariants).
@@ -134,6 +161,13 @@ class RunDB:
         conn = sqlite3.connect(self.path)
         conn.row_factory = sqlite3.Row
         conn.execute(_SCHEMA_SQL)
+        try:
+            conn.execute(_ALTER_ADD_LOG_PATH_SQL)
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc):
+                raise
+            # Column already present (the normal case for any db that has
+            # already been through this migration once) — nothing to do.
         conn.commit()
         self._conn = conn
         return conn
@@ -146,21 +180,32 @@ class RunDB:
     #     image: str — OCI image reference as given to `jailrun run`
     #     image_digest: str — resolved image digest (empty string if unknown)
     #     dataset: str — ZFS dataset / rootfs path backing this run
+    #     log_path: str | None — path to this run's captured stdout/stderr log
+    #               file (see runtime/engine.py's _open_log_file()), or None if
+    #               no log is being persisted for this run (default None, so
+    #               existing callers that don't pass it keep working unchanged)
     #   output: None
     #   sideEffects: opens/creates the db (see _get_conn); INSERT OR REPLACE the
     #                row with status='running', exit_code=NULL, started_at=now,
-    #                ended_at=NULL. On OSError/sqlite3.Error: logs a warning via
-    #                log.warning() and returns — NEVER raises (recording run
-    #                state must never crash an actual jail run).
-    def record_start(self, jail_name: str, image: str, image_digest: str, dataset: str) -> None:
+    #                ended_at=NULL, log_path=log_path. On OSError/sqlite3.Error:
+    #                logs a warning via log.warning() and returns — NEVER raises
+    #                (recording run state must never crash an actual jail run).
+    def record_start(
+        self,
+        jail_name: str,
+        image: str,
+        image_digest: str,
+        dataset: str,
+        log_path: str | None = None,
+    ) -> None:
         """Record that jail_name has started running. Degrades gracefully on error."""
         try:
             conn = self._get_conn()
             conn.execute(
                 "INSERT OR REPLACE INTO runs "
-                "(jail_name, image, image_digest, dataset, status, exit_code, started_at, ended_at) "
-                "VALUES (?, ?, ?, ?, 'running', NULL, ?, NULL)",
-                (jail_name, image, image_digest, dataset, _now_iso()),
+                "(jail_name, image, image_digest, dataset, status, exit_code, started_at, ended_at, log_path) "
+                "VALUES (?, ?, ?, ?, 'running', NULL, ?, NULL, ?)",
+                (jail_name, image, image_digest, dataset, _now_iso(), log_path),
             )
             conn.commit()
         except (OSError, sqlite3.Error) as exc:
@@ -218,4 +263,29 @@ class RunDB:
             cur = conn.execute("SELECT * FROM runs ORDER BY started_at DESC")
         return [dict(row) for row in cur.fetchall()]
     # list_runs:end
+
+    # get_log_path:start
+    #   purpose: look up the recorded log file path for a given jail_name, for
+    #            `jailrun logs <jail_name>` to retrieve captured output after
+    #            the fact
+    #   input:
+    #     jail_name: str — jail name, primary key
+    #   output:
+    #     log_path: str | None — the row's log_path column value, or None if
+    #               jail_name has no row at all, or its row's log_path is NULL
+    #   sideEffects: opens/creates the db (see _get_conn); read-only SELECT.
+    #                Like list_runs(), this does NOT swallow OSError/sqlite3.Error
+    #                — an unreadable/unwritable db path here is a genuine
+    #                environment problem on a read path; the caller (`jailrun
+    #                logs`, in runtime/cli.py's _cmd_logs) catches it and turns
+    #                it into a friendly CLI error.
+    def get_log_path(self, jail_name: str) -> str | None:
+        """Return the recorded log_path for jail_name, or None if absent/unset."""
+        conn = self._get_conn()
+        cur = conn.execute("SELECT log_path FROM runs WHERE jail_name = ?", (jail_name,))
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return row["log_path"]
+    # get_log_path:end
 # RunDB:end

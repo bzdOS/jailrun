@@ -3,7 +3,8 @@
 # PURPOSE: S1 runtime core — hybrid native-first jail orchestrator
 # INTENT: Coordinates S3/S2/S4 seams to unpack an image into a ZFS clone, build a
 #         native-first PATH shadow layer, optionally load Linuxulator, start a
-#         FreeBSD jail via jail(8), run the user command with jexec(8), stream I/O,
+#         FreeBSD jail via jail(8), run the user command with jexec(8), stream I/O
+#         (teeing it to a persisted per-run log file for `jailrun logs`),
 #         and tear down the jail and optionally destroy the clone on exit.
 # DEPENDENCIES: stdlib (asyncio, json, logging, os, shlex, tempfile, textwrap, pathlib);
 #               store (S3 seam — resolve/unpack/clone/mount/destroy ZFS datasets);
@@ -670,9 +671,62 @@ async def _clear_rctl(jail_name: str) -> None:
 DEFAULT_JEXEC_TIMEOUT_S = 1800.0  # 30 minutes
 
 
+# ===========================================================================
+# Run log persistence (`jailrun logs`) — env-var reader + best-effort open
+# ===========================================================================
+
+# JAILRUN_LOG_DIR controls where per-run captured stdout/stderr logs are
+# written (see _open_log_file() and _run_async's log-file-setup, below).
+# Mirrors the JAILRUN_ZPOOL/JAILRUN_MOUNTPOINT_BASE env-var-reader pattern in
+# store.py's _get_zpool()/_get_mountpoint_base() — kept here (not in rundb.py)
+# because engine.py is where the log file itself is opened/written; rundb.py
+# only stores the resulting path in its log_path column.
+DEFAULT_LOG_DIR = "/var/log/jailrun"
+
+
+# _get_log_dir: reads JAILRUN_LOG_DIR env var, returns log directory path (no validation; created lazily by _open_log_file at write time)
+def _get_log_dir() -> str:
+    """Return the log directory root from JAILRUN_LOG_DIR; default '/var/log/jailrun'."""
+    return os.environ.get("JAILRUN_LOG_DIR", DEFAULT_LOG_DIR).strip()
+
+
+# _open_log_file:start
+#   purpose: best-effort open (creating the parent directory first) of a
+#            run's per-jail log file, for _run_async to tee _stream_jexec's
+#            stdout/stderr into alongside the existing live streaming
+#   input:
+#     log_path: str — absolute path the log should be written to (see
+#               _get_log_dir(); caller builds this as
+#               '<_get_log_dir()>/<jail_name>.log')
+#   output:
+#     fh: (a binary file object opened in "wb" mode) | None — None if the
+#         parent directory or file could not be created/opened
+#   sideEffects: os.makedirs(parent dir, exist_ok=True); open(log_path, "wb").
+#                NEVER raises — any OSError is logged as a warning and None is
+#                returned, so the caller can continue with live streaming only
+#                (see _run_async's log-file-setup: recording run state / run
+#                output must never crash an actual jail run, same rationale as
+#                RunDB.record_start()/record_exit()).
+def _open_log_file(log_path: str):
+    """Best-effort open of a run's log file. Returns None (never raises) on failure."""
+    try:
+        parent = os.path.dirname(log_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        return open(log_path, "wb")  # noqa: SIM115 (closed explicitly by the caller)
+    except OSError as exc:
+        log.warning(
+            "could not open log file %s (continuing with live streaming only, no persisted log): %s",
+            log_path, exc,
+        )
+        return None
+# _open_log_file:end
+
+
 # _stream_jexec:start
 #   purpose: execute a command inside a running jail via jexec(8) and stream
 #            its stdout/stderr line-by-line to the process's own stdout/stderr
+#            (and, best-effort, tee the same bytes into a persisted log file)
 #   input:
 #     jail_name: str — name of an already-running jail (started with jail -c)
 #     cmd: list[str] — command and arguments to run inside the jail
@@ -682,13 +736,21 @@ DEFAULT_JEXEC_TIMEOUT_S = 1800.0  # 30 minutes
 #     conf_path: str | None — the jail.conf used to `-c` this jail; passed to an
 #                emergency `jail -f <conf_path> -r` on timeout so mount += entries
 #                get unmounted the same way normal teardown does (see rationale)
+#     log_file: an already-open binary file object (opened by _run_async via
+#               _open_log_file()), or None — when given, every chunk read from
+#               the jailed process's stdout/stderr is ALSO written here (tee),
+#               on top of the existing live streaming; this function does NOT
+#               open or close it (see _run_async, which owns that lifecycle)
 #   output:
 #     exit_code: int — exact returncode of the process that ran inside the jail
 #   sideEffects: spawns subprocess `jexec <jail_name> [sh -c 'cd <workdir> && ]
 #                env KEY=VALUE ... <cmd>`; pipes jail process stdout line-by-line
 #                to sys.stdout.buffer; pipes jail process stderr line-by-line to
 #                sys.stderr.buffer; on timeout, removes the WHOLE JAIL (not just
-#                the jexec'd process)
+#                the jexec'd process); if log_file is given, writes the same
+#                bytes to it too — a write failure there is caught, logged as a
+#                warning, and DISABLES further log writes for the rest of this
+#                call (live streaming to stdout/stderr is never affected)
 #   rationale: jexec is used instead of jail exec.start because exec.start returns
 #              rc=0 on successful dispatch regardless of the inner command's exit code
 async def _stream_jexec(
@@ -699,6 +761,7 @@ async def _stream_jexec(
     env: dict[str, str],
     workdir: str | None,
     timeout: float | None = DEFAULT_JEXEC_TIMEOUT_S,
+    log_file: Any = None,
 ) -> int:
     """
     Execute `cmd` inside `jail_name` via jexec; stream stdout+stderr to our
@@ -710,6 +773,12 @@ async def _stream_jexec(
 
     env is passed via `jexec -l` (login environment) + explicit KEY=VALUE
     prepended to the command so they are seen by the target binary.
+
+    If log_file is given (an already-open binary file, see _run_async), the
+    same bytes streamed to stdout/stderr are ALSO written there (tee) so
+    `jailrun logs <jail_name>` can retrieve them later. A failure to write to
+    log_file is swallowed (logged as a warning, further log writes disabled
+    for this call) — it must never affect the live streaming or the run.
 
     Raises RuntimeError if the jailed process exceeds `timeout` — the process is
     killed first so nothing is left running inside the jail.
@@ -749,7 +818,7 @@ async def _stream_jexec(
     )
 
     async def _pipe_lines(stream: asyncio.StreamReader, sink: Any) -> None:
-        # _pipe_lines: drains stream in raw chunks into sink.buffer (pure IO pump, no return value)
+        # _pipe_lines: drains stream in raw chunks into sink.buffer, best-effort tee to log_file (pure IO pump, no return value)
         # Chunk-based (stream.read), not line-based (readline): a build tool's
         # progress output (e.g. a `\r`-updated bar with no `\n` for a long
         # stretch) can exceed asyncio's default 64KB readline() buffer limit —
@@ -757,12 +826,29 @@ async def _stream_jexec(
         # compile crashed the whole run with "ValueError: Separator is not found,
         # and chunk exceed the limit". We only need passthrough streaming here,
         # not line boundaries, so chunked reads have no such limit at all.
+        nonlocal log_file
         while True:
             chunk = await stream.read(65536)
             if not chunk:
                 break
             sink.buffer.write(chunk)
             sink.buffer.flush()
+            # [DEFENSE IN DEPTH] Tee the same bytes into the persisted log
+            # file, if one is open. A write failure here (disk full, fd
+            # closed out from under us, ...) must NEVER interrupt the live
+            # streaming above or the run itself — log it once and stop
+            # trying for the rest of this call.
+            if log_file is not None:
+                try:
+                    log_file.write(chunk)
+                    log_file.flush()
+                except OSError as exc:
+                    log.warning(
+                        "log file write failed for jail %s (continuing with live "
+                        "streaming only, no further persisted log for this run): %s",
+                        jail_name, exc,
+                    )
+                    log_file = None
 
     import sys  # noqa: PLC0415
 
@@ -862,9 +948,15 @@ def run(image_ref: str, cmd: list[str], opts: dict[str, Any]) -> int:
 #     - creates mountpoint directories under rootfs for Linuxulator pseudo-filesystems
 #     - writes a temporary jail.conf file via tempfile.NamedTemporaryFile
 #     - runs subprocess `jail -f <conf_path> -c <jail_name>` to start the jail
-#     - calls RunDB().record_start(jail_name, ...) right after `jail -c` succeeds
-#       (best-effort — see runtime/rundb.py; never raises out of this function)
-#     - runs jexec via _stream_jexec() — runs command inside the jail
+#     - calls _open_log_file() to best-effort open <JAILRUN_LOG_DIR>/<jail_name>.log
+#       for `jailrun logs` (never raises out of this function; None on failure)
+#     - calls RunDB().record_start(jail_name, ..., log_path=...) right after
+#       `jail -c` succeeds (best-effort — see runtime/rundb.py; never raises
+#       out of this function)
+#     - runs jexec via _stream_jexec() — runs command inside the jail, teeing
+#       stdout/stderr into the log file opened above (if any)
+#     - closes the log file (if opened), in the finally block, regardless of
+#       how the run ended
 #     - runs subprocess `jail -r <jail_name>` to remove the jail (always, in finally)
 #     - calls runtime.lifecycle.teardown(jail_name) if lifecycled is present
 #     - calls RunDB().record_exit(jail_name, ...) in the finally block, iff a
@@ -943,6 +1035,14 @@ async def _run_async(
     # CHECK-constrained status column offers.
     jail_created = False
     run_completed = False
+    # log_fh: the open binary file object teeing this run's stdout/stderr to
+    # disk (see _open_log_file()/_stream_jexec's log_file param), or None if
+    # no log file was ever opened. log_path: the path recorded into RunDB's
+    # log_path column — set back to None if opening actually failed (see
+    # START_LOG_FILE_SETUP below), so `jailrun logs` never points at a path
+    # nothing was ever written to.
+    log_fh: Any = None
+    log_path: str | None = None
 
     try:
         # START_LOAD_MANIFEST
@@ -1079,6 +1179,33 @@ async def _run_async(
         log.info("jail %s created", jail_name)
         jail_created = True
 
+        # START_LOG_FILE_SETUP
+        # ------------------------------------------------------------------
+        # 6a. Give this run a persisted log file so `jailrun logs <jail_name>`
+        # can retrieve captured output after the fact (runtime/rundb.py's
+        # log_path column + get_log_path()). Convention: <JAILRUN_LOG_DIR>/
+        # <jail_name>.log (see _get_log_dir()).
+        # ------------------------------------------------------------------
+        # [DEFENSE IN DEPTH] _open_log_file() already catches OSError
+        # internally and never raises (returns None instead) — this
+        # try/except is a second layer against any other unexpected exception
+        # type, same rationale as the RunDB call below: a failure to open the
+        # log file must NEVER break a real jail run. If it can't be opened,
+        # we fall back to live streaming only and record no log_path (a path
+        # nothing was ever written to would only mislead `jailrun logs`).
+        log_path = os.path.join(_get_log_dir(), f"{jail_name}.log")
+        try:
+            log_fh = _open_log_file(log_path)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "failed to open log file %s for %s (non-fatal, no persisted log): %s",
+                log_path, jail_name, exc,
+            )
+            log_fh = None
+        if log_fh is None:
+            log_path = None
+        # END_LOG_FILE_SETUP
+
         # Record the run start for `jailrun ps` (runtime/rundb.py). Imported
         # lazily so engine.py stays importable/testable without a real db.
         # image_digest uses snapshot_id — the one image identifier available
@@ -1098,6 +1225,7 @@ async def _run_async(
                 image=image_ref,
                 image_digest=str(snapshot_id),
                 dataset=handle.dataset,
+                log_path=log_path,
             )
         except Exception as exc:  # noqa: BLE001
             log.warning("rundb: failed to record run start for %s (non-fatal): %s", jail_name, exc)
@@ -1121,12 +1249,23 @@ async def _run_async(
             env=env,
             workdir=workdir,
             timeout=jexec_timeout,
+            log_file=log_fh,
         )
         log.info("jexec finished with exit code %d", exit_code)
         run_completed = True  # a real exit_code was produced — see record_exit below
         # END_JEXEC_RUN
 
     finally:
+        # Close this run's log file (if one was ever opened) regardless of how
+        # we got here (normal return, jexec timeout, or any other exception) —
+        # best-effort, a close failure is never fatal to the run, which is
+        # already over by this point either way.
+        if log_fh is not None:
+            try:
+                log_fh.close()
+            except OSError:
+                pass
+
         # START_TEARDOWN
         # ------------------------------------------------------------------
         # 8. Teardown: stop jail; optionally destroy rootfs clone

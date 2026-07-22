@@ -6,7 +6,7 @@
 # DEPENDENCIES: stdlib (argparse, sys, sqlite3, json); runtime.engine.run;
 #               runtime.engine._store_module/_load_manifest (explain IMAGE path);
 #               runtime.explain.render_explain; runtime.lifecycle.Lifecycled;
-#               runtime.rundb.RunDB (ps); runtime.doctor (doctor); runtime.gc (gc);
+#               runtime.rundb.RunDB (ps, logs); runtime.doctor (doctor); runtime.gc (gc);
 #               runtime.scan.scan_image/aggregate/render (scan)
 # PUBLIC_API: main(argv) -> int
 # END_AI_HEADER
@@ -17,6 +17,7 @@ jailrun CLI — docker-run-compatible argument parser for the jailrun runtime.
 Entry point: `jailrun` dispatches to subcommands:
   jailrun run [FLAGS] IMAGE [CMD [ARGS...]]
   jailrun ps [--all]
+  jailrun logs JAIL_NAME
   jailrun explain [--manifest FILE | IMAGE] [--format text|json]
   jailrun scan IMAGE [IMAGE...] [--format text|json]
   jailrun doctor [--format text|json]
@@ -239,6 +240,23 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="Show all runs, including exited/killed (default: running only).",
+    )
+
+    # ---- logs -----------------------------------------------------------
+    logs_p = sub.add_parser(
+        "logs",
+        help="Show a run's captured stdout/stderr (from the run-state db)",
+        description=(
+            "Print a completed (or in-progress) run's captured stdout/stderr,\n"
+            "looked up via the run-state db (runtime/rundb.py)'s log_path\n"
+            "column — the same way `docker logs` retrieves a container's\n"
+            "output after the fact."
+        ),
+    )
+    logs_p.add_argument(
+        "jail",
+        metavar="JAIL_NAME",
+        help="jail name (e.g. jailrun-<handle>), as shown by `jailrun ps`.",
     )
 
     # ---- explain --------------------------------------------------------
@@ -603,6 +621,50 @@ def _cmd_ps(args: argparse.Namespace) -> int:
     return 0
 
 
+# _cmd_logs:start
+#   purpose: print a completed (or in-progress) run's captured stdout/stderr,
+#            looked up via the run-state db's log_path column, the same way
+#            `docker logs` retrieves a container's output after the fact
+#   input:
+#     args: argparse.Namespace — parsed flags from the 'logs' subparser (jail: str)
+#   output:
+#     exit_code: int — 0 if a log_path was found and its file read
+#                successfully; 1 for every ordinary failure case (unknown
+#                jail_name, jail_name with no recorded log_path, the recorded
+#                file missing/unreadable on disk, or an unusable run-state db)
+#                — always a clean one-line message, never a raw traceback
+#   sideEffects: imports runtime.rundb.RunDB (lazy, matching the other _cmd_*
+#                handlers) and calls .get_log_path(args.jail), which may
+#                open/create the sqlite db at JAILRUN_DB (default
+#                /var/db/jailrun/runs.db); reads the log file at the returned
+#                path (if any) and writes its contents to stdout via print()
+# _cmd_logs:end
+def _cmd_logs(args: argparse.Namespace) -> int:
+    """Print a run's captured output via RunDB.get_log_path(); return exit code."""
+    import sqlite3  # noqa: PLC0415
+    from runtime.rundb import RunDB  # noqa: PLC0415
+
+    try:
+        log_path = RunDB().get_log_path(args.jail)
+    except (OSError, sqlite3.Error) as exc:
+        print(f"jailrun logs: could not read run-state db: {exc}", file=sys.stderr)
+        return 1
+
+    if not log_path:
+        print(f"jailrun logs: no log found for {args.jail!r}", file=sys.stderr)
+        return 1
+
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as fh:
+            content = fh.read()
+    except OSError as exc:
+        print(f"jailrun logs: could not read log file {log_path!r}: {exc}", file=sys.stderr)
+        return 1
+
+    print(content, end="")
+    return 0
+
+
 # CONTRACT: format JAILRUN_VERSION + runtime/host strings -> print 3 lines to stdout -> return 0
 def _cmd_version(_args: argparse.Namespace) -> int:
     print(f"jailrun version {JAILRUN_VERSION}")
@@ -683,9 +745,9 @@ def _cmd_lifecycle(verb: str, args: argparse.Namespace) -> int:
 #   output:
 #     exit_code: int — 0 on success; 1 on unknown subcommand or handler failure
 #   sideEffects: calls _build_parser() to construct the argument parser; delegates to
-#                _cmd_run / _cmd_ps / _cmd_explain / _cmd_scan / _cmd_doctor / _cmd_gc /
-#                _cmd_version / _cmd_lifecycle which each have their own side effects;
-#                argparse may write to stderr and call sys.exit on bad args
+#                _cmd_run / _cmd_ps / _cmd_logs / _cmd_explain / _cmd_scan / _cmd_doctor /
+#                _cmd_gc / _cmd_version / _cmd_lifecycle which each have their own side
+#                effects; argparse may write to stderr and call sys.exit on bad args
 # main:end
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
@@ -695,6 +757,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_run(args)
     if args.subcommand == "ps":
         return _cmd_ps(args)
+    if args.subcommand == "logs":
+        return _cmd_logs(args)
     if args.subcommand == "explain":
         return _cmd_explain(args)
     if args.subcommand == "scan":

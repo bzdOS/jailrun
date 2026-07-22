@@ -284,6 +284,149 @@ def test_constructor_arg_overrides_env_var():
 
 
 # ---------------------------------------------------------------------------
+# log_path column: record_start(log_path=...) / get_log_path()
+# ---------------------------------------------------------------------------
+
+# CONTRACT: record_start(..., log_path=...) stores it, and it round-trips
+# through both list_runs() and get_log_path().
+def test_record_start_with_log_path_stored_and_retrieved():
+    """record_start(log_path=...) is stored and retrievable via get_log_path()."""
+    db = RunDB(path=":memory:")
+    db.record_start(
+        "jailrun-haslog",
+        "alpine:3.19",
+        "sha256:deadbeef",
+        "jailrun/runs/haslog",
+        log_path="/var/log/jailrun/jailrun-haslog.log",
+    )
+
+    row = db.list_runs()[0]
+    assert row["log_path"] == "/var/log/jailrun/jailrun-haslog.log"
+    assert db.get_log_path("jailrun-haslog") == "/var/log/jailrun/jailrun-haslog.log"
+    print("PASS test_record_start_with_log_path_stored_and_retrieved")
+
+
+# CONTRACT: record_start() without a log_path arg (the default, matching
+# every EXISTING caller/test) stores NULL — get_log_path() returns None, and
+# nothing breaks (backward compatibility with the pre-log_path signature).
+def test_record_start_without_log_path_defaults_to_null():
+    """record_start() with no log_path arg stores NULL; get_log_path() -> None."""
+    db = RunDB(path=":memory:")
+    db.record_start("jailrun-nolog", "alpine:3.19", "", "jailrun/runs/nolog")
+
+    row = db.list_runs()[0]
+    assert row["log_path"] is None
+    assert db.get_log_path("jailrun-nolog") is None
+    print("PASS test_record_start_without_log_path_defaults_to_null")
+
+
+# CONTRACT: get_log_path() on a jail_name with no row at all returns None
+# (not an exception).
+def test_get_log_path_unknown_jail_returns_none():
+    """get_log_path() on an unrecognized jail_name returns None."""
+    db = RunDB(path=":memory:")
+    assert db.get_log_path("jailrun-never-existed") is None
+    print("PASS test_get_log_path_unknown_jail_returns_none")
+
+
+# CONTRACT: get_log_path() on a jail_name whose row exists but has log_path=NULL
+# also returns None — same shape as "not found", not a crash.
+def test_get_log_path_found_row_but_null_log_path():
+    """get_log_path() returns None for a real row whose log_path column is NULL."""
+    db = RunDB(path=":memory:")
+    db.record_start("jailrun-rowbutnolog", "alpine:3.19", "", "jailrun/runs/rowbutnolog")
+    assert db.get_log_path("jailrun-rowbutnolog") is None
+    print("PASS test_get_log_path_found_row_but_null_log_path")
+
+
+# ---------------------------------------------------------------------------
+# Schema migration: ALTER TABLE ... ADD COLUMN log_path (idempotent upgrade)
+# ---------------------------------------------------------------------------
+
+# CONTRACT: opening the SAME on-disk db file via separate RunDB instances
+# (each running its own _get_conn() schema/migration step on a fresh
+# sqlite3 connection) never raises on the "column already exists" path —
+# proves the ALTER TABLE migration is idempotent, not a one-shot fluke.
+def test_schema_migration_idempotent_across_instances():
+    """Re-opening the same db file in fresh RunDB instances never errors on the migration."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "runs.db")
+
+        db1 = RunDB(path=db_path)
+        db1.record_start(
+            "jailrun-mig",
+            "alpine:3.19",
+            "",
+            "jailrun/runs/mig",
+            log_path="/var/log/jailrun/jailrun-mig.log",
+        )
+
+        # A second, completely separate instance/connection against the SAME
+        # db file must not raise on the ALTER TABLE ADD COLUMN log_path step.
+        db2 = RunDB(path=db_path)
+        rows = db2.list_runs()
+        assert len(rows) == 1
+        assert rows[0]["log_path"] == "/var/log/jailrun/jailrun-mig.log"
+
+        # And a third, for good measure (not a fluke of exactly two).
+        db3 = RunDB(path=db_path)
+        assert db3.get_log_path("jailrun-mig") == "/var/log/jailrun/jailrun-mig.log"
+    print("PASS test_schema_migration_idempotent_across_instances")
+
+
+# CONTRACT: a db file created with the OLD (pre-log_path) table shape upgrades
+# in place the first time RunDB opens it — no fresh db needed, pre-existing
+# rows survive with log_path=NULL, and it's fully usable (including writing a
+# NEW row with a real log_path) afterward.
+def test_alter_table_upgrades_pre_existing_old_shape_db():
+    """A pre-log_path-column db file is upgraded in place by RunDB's migration."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "old_runs.db")
+
+        # Simulate a db created before the log_path column existed at all.
+        old_conn = sqlite3.connect(db_path)
+        old_conn.execute(
+            """
+            CREATE TABLE runs (
+                jail_name    TEXT PRIMARY KEY,
+                image        TEXT,
+                image_digest TEXT,
+                dataset      TEXT,
+                status       TEXT CHECK(status IN ('running', 'exited', 'killed')),
+                exit_code    INTEGER,
+                started_at   TEXT,
+                ended_at     TEXT
+            )
+            """
+        )
+        old_conn.execute(
+            "INSERT INTO runs (jail_name, image, status, started_at) "
+            "VALUES ('jailrun-old-shape', 'alpine:3.19', 'exited', '2026-01-01T00:00:00+00:00')"
+        )
+        old_conn.commit()
+        old_conn.close()
+
+        # Opening this pre-existing db via RunDB must upgrade it in place.
+        db = RunDB(path=db_path)
+        rows = db.list_runs()
+        assert len(rows) == 1
+        assert rows[0]["jail_name"] == "jailrun-old-shape"
+        assert rows[0]["log_path"] is None
+        assert db.get_log_path("jailrun-old-shape") is None
+
+        # And it's fully usable going forward, exactly like a fresh db.
+        db.record_start(
+            "jailrun-new-shape",
+            "alpine:3.19",
+            "",
+            "jailrun/runs/new-shape",
+            log_path="/var/log/jailrun/jailrun-new-shape.log",
+        )
+        assert db.get_log_path("jailrun-new-shape") == "/var/log/jailrun/jailrun-new-shape.log"
+    print("PASS test_alter_table_upgrades_pre_existing_old_shape_db")
+
+
+# ---------------------------------------------------------------------------
 # _render_ps_table (runtime/cli.py) — pure rendering, shape only
 # ---------------------------------------------------------------------------
 
@@ -357,6 +500,12 @@ TESTS = [
     test_default_path_resolution,
     test_env_var_overrides_default_path,
     test_constructor_arg_overrides_env_var,
+    test_record_start_with_log_path_stored_and_retrieved,
+    test_record_start_without_log_path_defaults_to_null,
+    test_get_log_path_unknown_jail_returns_none,
+    test_get_log_path_found_row_but_null_log_path,
+    test_schema_migration_idempotent_across_instances,
+    test_alter_table_upgrades_pre_existing_old_shape_db,
     test_render_ps_table_empty,
     test_render_ps_table_with_rows,
     test_render_ps_table_tolerates_missing_keys,
