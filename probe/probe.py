@@ -7,6 +7,7 @@
 #         and which have a pkg/port drop-in so linuxulator can be avoided entirely.
 #         This module answers that question as a JSON manifest consumed by the bakery stage.
 # DEPENDENCIES: stdlib only (argparse, json, os, struct, sys, datetime, pathlib);
+#               providers (PROVIDER_MAP, loaded from providers/provider-map.json);
 #               no pkg/ports/git; ELF parsing is hand-rolled byte reads (elf(5)).
 # PUBLIC_API: probe(rootfs_dir, image_ref, snapshot_id) -> dict
 #             main() -> None (CLI entry point)
@@ -33,6 +34,8 @@ import struct
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+from providers import PROVIDER_MAP  # noqa: F401 — re-exported below for probe.probe.PROVIDER_MAP callers
 
 # ---------------------------------------------------------------------------
 # ELF constants (SYSV ABI + elf(5) — man7.org/linux/man-pages/man5/elf.5.html)
@@ -84,92 +87,28 @@ EM_NAMES = {
 # Linux → FreeBSD provider map
 # Key: basename (lower-case) of the Linux binary.
 # Value: FreeBSD provider string:  pkg:<name>  | port:<origin>  | build:<id>
-# EXTENSIBLE: add rows here; probe picks the first matching key.
+#
+# Moved to data 2026-07-22 (roadmap 0.3 — "the registry becomes data, not
+# code"): the table itself now lives in providers/provider-map.json
+# (schema: providers/registry.schema.json), loaded once at import by
+# providers/__init__.py and re-exported here as PROVIDER_MAP so existing
+# callers (probe.propose_native, probe.classify_role, and any test doing
+# `from probe.probe import PROVIDER_MAP`) keep working unchanged.
+# EXTENSIBLE: add rows to providers/provider-map.json; probe picks the first
+# matching key.
+#
+# NOTE on a deliberate omission: "xz" is NOT in provider-map.json.
+# Removed 2026-07-19 — confirmed live via `pkg rquery` on FreeBSD 15.1: there
+# is no pkg named "xz" (it's shipped in the FreeBSD BASE system at
+# /usr/bin/xz, not installable via pkg(8) at all). bakery's native-base
+# dataset is populated ONLY by pkg/port installs (no base.txz extraction
+# happens anywhere in this pipeline), so a bare host path isn't reachable
+# from inside it either — this needs a real "already in the FreeBSD base
+# system" provider scheme (distinct from pkg:/port:/build:) to do properly;
+# until that exists, leave xz unmapped so it correctly falls back to
+# status=linuxulator (already a proven path) instead of failing the whole
+# provisioning plan outright.
 # ---------------------------------------------------------------------------
-PROVIDER_MAP: dict[str, str] = {
-    # Python runtimes
-    "python3":        "pkg:python311",
-    "python3.11":     "pkg:python311",
-    "python3.10":     "pkg:python310",
-    "python3.12":     "pkg:python312",
-    "python":         "pkg:python311",
-
-    # Build systems
-    "cmake":          "pkg:cmake",
-    "ninja":          "pkg:ninja",
-    "make":           "pkg:gmake",
-    "gmake":          "pkg:gmake",
-    "meson":          "pkg:meson",
-    "bazel":          "pkg:bazel",
-    "scons":          "pkg:scons",
-
-    # Compilers / toolchains
-    "gcc":            "pkg:gcc",
-    "g++":            "pkg:gcc",
-    "clang":          "pkg:llvm",
-    "clang++":        "pkg:llvm",
-    "ld":             "pkg:binutils",
-    "ar":             "pkg:binutils",
-    "objcopy":        "pkg:binutils",
-    "strip":          "pkg:binutils",
-    "nm":             "pkg:binutils",
-    "readelf":        "pkg:binutils",
-
-    # Xtensa ESP toolchain (the esphome load-bearing binary)
-    "xtensa-esp32-elf-gcc":    "port:devel/xtensa-esp-elf",
-    "xtensa-esp32-elf-g++":    "port:devel/xtensa-esp-elf",
-    "xtensa-esp32-elf-ld":     "port:devel/xtensa-esp-elf",
-    "xtensa-esp32-elf-objcopy":"port:devel/xtensa-esp-elf",
-    "xtensa-esp32s2-elf-gcc":  "port:devel/xtensa-esp-elf",
-    "xtensa-esp32s3-elf-gcc":  "port:devel/xtensa-esp-elf",
-    "xtensa-lx106-elf-gcc":    "port:devel/xtensa-esp-elf",
-    "riscv32-esp-elf-gcc":     "port:devel/riscv32-esp-elf",
-
-    # Interpreters / runtimes
-    "node":           "pkg:node",
-    "nodejs":         "pkg:node",
-    "ruby":           "pkg:ruby",
-    "perl":           "pkg:perl5",
-    "perl5":          "pkg:perl5",
-    "php":            "pkg:php83",
-    "lua":            "pkg:lua54",
-    "java":           "pkg:openjdk21",
-
-    # Shell & coreutils
-    "bash":           "pkg:bash",
-    "sh":             "pkg:bash",
-    "dash":           "pkg:dash",
-    "zsh":            "pkg:zsh",
-    "curl":           "pkg:curl",
-    "wget":           "pkg:wget",
-    "git":            "pkg:git",
-    "tar":            "pkg:gtar",
-    "gzip":           "pkg:gzip",
-    "bzip2":          "pkg:bzip2",
-    # "xz" removed 2026-07-19 — confirmed live via `pkg rquery`
-    # on FreeBSD 15.1: there is no pkg named "xz" (it's shipped in the FreeBSD
-    # BASE system at /usr/bin/xz, not installable via pkg(8) at all). bakery's
-    # native-base dataset is populated ONLY by pkg/port installs (no base.txz
-    # extraction happens anywhere in this pipeline), so a bare host path isn't
-    # reachable from inside it either — this needs a real "already in the
-    # FreeBSD base system" provider scheme (distinct from pkg:/port:/build:) to
-    # do properly; until that exists, leave xz unmapped so it correctly falls
-    # back to status=linuxulator (already a proven path) instead of failing the
-    # whole provisioning plan outright.
-    "zip":            "pkg:zip",
-    "unzip":          "pkg:unzip",
-
-    # Libraries commonly surfacing as binaries
-    "openssl":        "pkg:openssl",
-    "sqlite3":        "pkg:sqlite3",
-
-    # Package managers (likely linuxulator; map only if port exists)
-    "pip":            "pkg:py311-pip",
-    "pip3":           "pkg:py311-pip",
-
-    # esphome ecosystem
-    "esphome":        "pkg:py311-esphome",
-}
 
 # Basenames that are definitively "load-bearing" regardless of size heuristic
 LOAD_BEARING_NAMES: frozenset[str] = frozenset({

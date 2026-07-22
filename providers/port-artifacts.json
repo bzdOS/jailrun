@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "artifacts": {
+    "devel/xtensa-esp-elf": "/usr/local/xtensa-esp-elf/bin/xtensa-esp-elf-gcc",
+    "devel/xtensa-esp32-elf": "/usr/local/xtensa-esp32-elf-idf52/bin/xtensa-esp32-elf-gcc",
+    "devel/esp-quick-toolchain": "/usr/local/esp-quick-toolchain-gcc103/xtensa-lx106-elf/bin/xtensa-lx106-elf-gcc"
+  }
+}

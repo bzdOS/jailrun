@@ -2,7 +2,7 @@
 # MODULE: bakery/bakery.py
 # PURPOSE: S4 native-supply subsystem — resolves native.provider strings in a Substitution Manifest to concrete FreeBSD artifact paths and registers a provisioning base with S3 store.
 # INTENT: Bridges S2 probe output (manifest with status=native binaries) and S3 store (ZFS base provisioning); sits between them so runtime S1 can consume a fully resolved manifest with snapshot_id.
-# DEPENDENCIES: stdlib (copy, hashlib, json, logging, re, dataclasses, pathlib, typing); store.Store (mocked here — real impl in store/); external tools: pkg(8) install, ports make, crosstool-NG build (executed by store, not bakery directly)
+# DEPENDENCIES: stdlib (copy, hashlib, json, logging, re, dataclasses, pathlib, typing); providers (PKG_ARTIFACTS/PORT_ARTIFACTS/MULTI_BINARY_PKGS, loaded from providers/*.json); store.Store (mocked here — real impl in store/); external tools: pkg(8) install, ports make, crosstool-NG build (executed by store, not bakery directly)
 # PUBLIC_API: bake(manifest) -> dict; build_plan(manifest) -> (ProvisioningPlan, list[str]); plan_to_provision_cmd(plan) -> str; fill_artifact_paths(manifest, plan) -> dict; parse_provider(provider) -> (kind, target); resolve_pkg/resolve_port/resolve_build
 # END_AI_HEADER
 """
@@ -35,6 +35,8 @@ import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from providers import MULTI_BINARY_PKGS, PKG_ARTIFACTS, PORT_ARTIFACTS
 
 log = logging.getLogger(__name__)
 
@@ -83,62 +85,32 @@ except ImportError:  # running on Linux / seam not yet on PYTHONPATH
 
 # ---------------------------------------------------------------------------
 # Provider → artifact resolution tables
+#
+# Moved to data 2026-07-22 (roadmap 0.3 — "the registry becomes data, not
+# code"): PKG_ARTIFACTS, PORT_ARTIFACTS, and MULTI_BINARY_PKGS below are no
+# longer defined here — they're imported (above) from the `providers` package,
+# which loads them from providers/pkg-artifacts.json, providers/
+# port-artifacts.json, and providers/multi-binary-pkgs.json (schema:
+# providers/registry.schema.json). Re-exported under their original names so
+# existing callers (resolve_pkg, resolve_port, fill_artifact_paths, and any
+# test doing `from bakery.bakery import PKG_ARTIFACTS`) keep working unchanged.
+#
+# pkg:<name>  →  artifact_path_in_base. Paths are under /usr/local (FreeBSD
+# PREFIX) on freebsd-host. EXTENSIBLE: add rows to providers/pkg-artifacts.json.
+#
+# MULTI_BINARY_PKGS: packages that install MANY distinctly-named binaries
+# rather than one binary matching the package name (PKG_ARTIFACTS/
+# resolve_pkg's single-path model doesn't fit these) — fill_artifact_paths()
+# uses the ORIGINAL binary's own basename for these instead. Confirmed live
+# 2026-07-19: binutils installs ar/ld/nm/objcopy/readelf/strip/... under
+# /usr/local/bin/, not a single "/usr/local/bin/binutils".
+#
+# port:<origin>  →  artifact_path. The xtensa-esp-elf port (GCC 13, ESP-IDF
+# 5.2+/5.3+) installs under a prefix of /usr/local/xtensa-esp-elf/ (the
+# binaries land in that bin/). Source: freshports.org/devel/xtensa-esp-elf
+# (maintained leres@FreeBSD.org, last updated 2026-06-04, version
+# 13.2.0.20240530_17). EXTENSIBLE: add rows to providers/port-artifacts.json.
 # ---------------------------------------------------------------------------
-
-# pkg:<name>  →  (artifact_path_in_base, description)
-# Paths are under /usr/local (FreeBSD PREFIX) on freebsd-host.
-PKG_ARTIFACTS: dict[str, str] = {
-    "python311":      "/usr/local/bin/python3.11",
-    "python312":      "/usr/local/bin/python3.12",
-    "python313":      "/usr/local/bin/python3.13",
-    "cmake":          "/usr/local/bin/cmake",
-    "ninja":          "/usr/local/bin/ninja",
-    "git":            "/usr/local/bin/git",
-    "gmake":          "/usr/local/bin/gmake",
-    "bash":           "/usr/local/bin/bash",
-    "curl":           "/usr/local/bin/curl",
-    "wget":           "/usr/local/bin/wget",
-    "rsync":          "/usr/local/bin/rsync",
-    "gawk":           "/usr/local/bin/gawk",
-    "gsed":           "/usr/local/bin/gsed",
-    "perl5":          "/usr/local/bin/perl",
-    "pkgconf":        "/usr/local/bin/pkgconf",
-    # Build-tool deps (crosstool-NG, port builds)
-    "bison":          "/usr/local/bin/bison",
-    "automake":       "/usr/local/bin/automake",
-    "autoconf":       "/usr/local/bin/autoconf",
-    "libtool":        "/usr/local/bin/libtool",
-    "texinfo":        "/usr/local/bin/makeinfo",   # texinfo installs makeinfo
-    "help2man":       "/usr/local/bin/help2man",
-    "gperf":          "/usr/local/bin/gperf",
-    "zip":            "/usr/local/bin/zip",
-    "m4":             "/usr/local/bin/gm4",        # GNU m4 on FreeBSD
-}
-
-# Packages that install MANY distinctly-named binaries rather than one binary
-# matching the package name (PKG_ARTIFACTS/resolve_pkg's single-path model
-# doesn't fit these) — fill_artifact_paths() uses the ORIGINAL binary's own
-# basename for these instead. Confirmed live 2026-07-19:
-# binutils installs ar/ld/nm/objcopy/readelf/strip/... under /usr/local/bin/,
-# not a single "/usr/local/bin/binutils".
-MULTI_BINARY_PKGS: frozenset[str] = frozenset({"binutils"})
-
-# port:<origin>  →  artifact_path
-# The xtensa-esp-elf port (GCC 13, ESP-IDF 5.2+/5.3+) installs under a
-# prefix of /usr/local/xtensa-esp-elf/ (the binaries land in that bin/).
-# Source: freshports.org/devel/xtensa-esp-elf (maintained leres@FreeBSD.org,
-#         last updated 2026-06-04, version 13.2.0.20240530_17).
-PORT_ARTIFACTS: dict[str, str] = {
-    "devel/xtensa-esp-elf": "/usr/local/xtensa-esp-elf/bin/xtensa-esp-elf-gcc",
-    # Legacy flavored variant (pre-5.3 ESP-IDF):
-    "devel/xtensa-esp32-elf": "/usr/local/xtensa-esp32-elf-idf52/bin/xtensa-esp32-elf-gcc",
-    # esp-quick-toolchain (trombik): ESP8266/lx106 via GCC 10 port
-    # Port origin: devel/esp-quick-toolchain
-    # Installs to /usr/local/esp-quick-toolchain-gcc103/xtensa-lx106-elf/bin/
-    "devel/esp-quick-toolchain": (
-        "/usr/local/esp-quick-toolchain-gcc103/xtensa-lx106-elf/bin/xtensa-lx106-elf-gcc"
-    ),
-}
 
 # build:<recipe-id>  →  BuildRecipe
 

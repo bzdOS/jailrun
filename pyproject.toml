@@ -27,4 +27,10 @@ jailrun = "runtime.cli:main"
 [tool.setuptools]
 # Flat layout: the four subsystems are top-level packages for now. A single `jailrun`
 # package nest is a planned packaging step (see CONTRIBUTING).
-packages = ["runtime", "probe", "store", "bakery"]
+# `providers` (added 2026-07-22) holds the substitution lookup tables as schema-
+# validated JSON data (providers/*.json) instead of Python literals — package-data
+# below ensures the .json files ship alongside the loader when installed.
+packages = ["runtime", "probe", "store", "bakery", "providers"]
+
+[tool.setuptools.package-data]
+providers = ["*.json"]

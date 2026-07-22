@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "artifacts": {
+    "python311": "/usr/local/bin/python3.11",
+    "python312": "/usr/local/bin/python3.12",
+    "python313": "/usr/local/bin/python3.13",
+    "cmake": "/usr/local/bin/cmake",
+    "ninja": "/usr/local/bin/ninja",
+    "git": "/usr/local/bin/git",
+    "gmake": "/usr/local/bin/gmake",
+    "bash": "/usr/local/bin/bash",
+    "curl": "/usr/local/bin/curl",
+    "wget": "/usr/local/bin/wget",
+    "rsync": "/usr/local/bin/rsync",
+    "gawk": "/usr/local/bin/gawk",
+    "gsed": "/usr/local/bin/gsed",
+    "perl5": "/usr/local/bin/perl",
+    "pkgconf": "/usr/local/bin/pkgconf",
+    "bison": "/usr/local/bin/bison",
+    "automake": "/usr/local/bin/automake",
+    "autoconf": "/usr/local/bin/autoconf",
+    "libtool": "/usr/local/bin/libtool",
+    "texinfo": "/usr/local/bin/makeinfo",
+    "help2man": "/usr/local/bin/help2man",
+    "gperf": "/usr/local/bin/gperf",
+    "zip": "/usr/local/bin/zip",
+    "m4": "/usr/local/bin/gm4"
+  }
+}

@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jailrun/providers/registry.schema.json",
+  "title": "jailrun provider registry data files",
+  "description": "Validates the providers/*.json data files that hold the substitution lookup tables consumed by probe(S2) and bakery(S4): provider-map.json, pkg-artifacts.json, port-artifacts.json, multi-binary-pkgs.json. Each file's shape is one of the $defs below, picked by filename (see .github/scripts/validate_provider_data.py). schema_version is a plain integer today (bump only on a breaking shape change); values stay plain strings/lists for now, but the object wrapper leaves room for richer per-entry metadata (e.g. evidence/verification level) later without a format break.",
+  "$defs": {
+    "provider_map": {
+      "title": "provider-map.json",
+      "description": "Linux binary basename -> FreeBSD provider string. Mirrors probe.py's former PROVIDER_MAP.",
+      "type": "object",
+      "required": ["schema_version", "providers"],
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": { "type": "integer", "minimum": 1 },
+        "providers": {
+          "type": "object",
+          "description": "key: basename (lower-case) of the Linux binary. value: pkg:<name> | port:<origin> | build:<recipe-id>",
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^(pkg|port|build):.+$"
+          }
+        }
+      }
+    },
+    "pkg_artifacts": {
+      "title": "pkg-artifacts.json",
+      "description": "pkg name -> installed artifact path under /usr/local. Mirrors bakery.py's former PKG_ARTIFACTS.",
+      "type": "object",
+      "required": ["schema_version", "artifacts"],
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": { "type": "integer", "minimum": 1 },
+        "artifacts": {
+          "type": "object",
+          "description": "key: pkg name, e.g. 'cmake'. value: absolute artifact path on freebsd-host.",
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^/"
+          }
+        }
+      }
+    },
+    "port_artifacts": {
+      "title": "port-artifacts.json",
+      "description": "port origin -> installed artifact path. Mirrors bakery.py's former PORT_ARTIFACTS.",
+      "type": "object",
+      "required": ["schema_version", "artifacts"],
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": { "type": "integer", "minimum": 1 },
+        "artifacts": {
+          "type": "object",
+          "description": "key: port origin, e.g. 'devel/xtensa-esp-elf'. value: absolute artifact path on freebsd-host.",
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^/"
+          }
+        }
+      }
+    },
+    "multi_binary_pkgs": {
+      "title": "multi-binary-pkgs.json",
+      "description": "pkg names that install MANY distinctly-named binaries rather than one matching the package name. Mirrors bakery.py's former MULTI_BINARY_PKGS.",
+      "type": "object",
+      "required": ["schema_version", "packages"],
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": { "type": "integer", "minimum": 1 },
+        "packages": {
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        }
+      }
+    }
+  },
+  "anyOf": [
+    { "$ref": "#/$defs/provider_map" },
+    { "$ref": "#/$defs/pkg_artifacts" },
+    { "$ref": "#/$defs/port_artifacts" },
+    { "$ref": "#/$defs/multi_binary_pkgs" }
+  ]
+}
