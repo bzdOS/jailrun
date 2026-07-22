@@ -243,6 +243,7 @@ class Handle:
     mounts: list[tuple[Path, Path, bool]] = field(default_factory=list)
     # mounts entries: (host_path, dest_inside_rootfs, is_readonly)
     jail_name: Optional[str] = None      # set if a jail was started for this handle
+    thin: bool = False                   # True for empty_rootfs() handles — see destroy()
 
     # rootfs_str: returns str(self.rootfs) (pure, no IO)
     @property
@@ -741,6 +742,53 @@ class Store:
             return self._clone_plaindir(snapshot_id)
     # clone:end
 
+    # empty_rootfs:start
+    #   purpose: create an EMPTY writable directory as a run's rootfs, for the
+    #            thin-jail mode — the caller (engine.py) is expected to nullfs-ro
+    #            bind the actual base userland dirs (/bin, /lib, /libexec, /sbin,
+    #            /usr) into it via mount(), instead of copying/cloning a whole
+    #            base per run. Avoids the disk cost of cp -a (plaindir clone())
+    #            or a ZFS clone entirely — there is nothing to copy.
+    #   input: none
+    #   output: tuple[Path, Handle] — (rootfs_path, handle); handle.thin=True so
+    #           destroy() knows to rm -rf it directly rather than treating it as
+    #           a ZFS dataset or a clone() output (see destroy()'s early-return).
+    #   sideEffects: creates <mountpoint_base>/runs/<run_id> via Path.mkdir
+    #   rationale: regardless of self.backend — a thin rootfs is never a real ZFS
+    #              dataset (nothing was zfs-created for it), so it must never be
+    #              routed through the ZFS branch of destroy()
+    def empty_rootfs(self) -> tuple[Path, Handle]:
+        """Create an empty writable directory as a thin-jail run's rootfs.
+
+        Returns (rootfs_path, handle). The caller is responsible for mounting
+        the actual base directories into it via mount() before use."""
+        run_id = uuid.uuid4().hex
+        # Always a real host directory, never a ZFS dataset -- self._runs_ds is
+        # a DATASET NAME string in ZFS-backend mode (e.g. "jailrun/runs"), not
+        # a filesystem path, so it must not be used here regardless of backend.
+        dest = self.mountpoint_base / "runs" / run_id
+        dest.mkdir(parents=True, exist_ok=True)
+
+        # A cp -a'd or ZFS-cloned rootfs already CONTAINS /tmp, /var, /etc,
+        # /dev, /root -- this one starts genuinely empty, so mount.devfs (jail.conf)
+        # would fail with ENOENT on a missing /dev, and any tool that writes to
+        # /tmp or /var/run would fail outright. Pre-create the standard writable
+        # skeleton; the base dirs themselves (/bin, /lib, /usr, ...) are
+        # nullfs-ro bound separately by the caller via mount().
+        for d in ("tmp", "var", "etc", "dev", "root", "home"):
+            (dest / d).mkdir(parents=True, exist_ok=True)
+
+        handle = Handle(
+            id=run_id,
+            rootfs=dest,
+            dataset=str(dest),
+            snapshot_id="thin:empty",
+            thin=True,
+        )
+        log.info("empty_rootfs: created %s", dest)
+        return dest, handle
+    # empty_rootfs:end
+
     # mount:start
     #   purpose: bind-mount host paths into the clone rootfs using nullfs
     #   input:
@@ -915,6 +963,16 @@ class Store:
 
         # Step 2: unmount binds, deepest-first, BEFORE touching the dataset.
         self.unmount(handle)
+
+        # Step 2.5: thin-jail rootfs (empty_rootfs()) is NEVER a ZFS dataset,
+        # regardless of self.backend -- nothing was zfs-created for it, only a
+        # plain directory. Routing it through the ZFS branch below would try
+        # `zfs destroy <plain path>`, which fails (not a real dataset name).
+        if handle.thin:
+            log.info("destroy: rm -rf %s (thin rootfs)", handle.rootfs)
+            _rm_rf(handle.rootfs)
+            log.info("destroy: handle %s torn down", handle.id)
+            return
 
         # Step 3: destroy storage
         if self.backend == BACKEND_ZFS:

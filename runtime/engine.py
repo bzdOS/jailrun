@@ -983,6 +983,30 @@ async def _run_async(
         tuple(opts["rctl_rules"]) if opts.get("rctl_rules") else DEFAULT_RCTL_RULES
     ) if rctl_enabled else ()
     jexec_timeout: float | None = opts.get("timeout", DEFAULT_JEXEC_TIMEOUT_S)
+    allow_unrestricted_devfs: bool = opts.get("allow_unrestricted_devfs", False)
+
+    # [SECURITY] Fail closed on the confirmed devfs gap. When jailrun runs
+    # nested (inside a jail), the only devfs ruleset it can select for its own
+    # run-jails is 0 (unrestricted) -- applying ruleset 4 is a host-only
+    # privilege (PRIV_DEVFS_RULE), not delegable to a jail via any allow.*
+    # flag. Verified live 2026-07-23: a process inside such a nested run-jail
+    # can actually `dd if=/dev/mem` and read real bytes (rc=0) -- this is not
+    # cosmetic, it is a genuine physical-memory-disclosure primitive reachable
+    # by anything that runs inside the sandbox, i.e. by the untrusted code the
+    # sandbox exists to contain. Refuse by default; callers that have verified
+    # their own workload is trusted (manual verification/testing, NOT
+    # production untrusted-upload compiles) can opt in explicitly.
+    if _is_jailed() and not allow_unrestricted_devfs:
+        raise RuntimeError(
+            "refusing to run: jailrun is nested (inside a jail) and cannot "
+            "apply a restricted devfs ruleset to its own run-jails -- the "
+            "sandbox's /dev would be unrestricted (verified: /dev/mem is "
+            "readable from inside such a run-jail). This is unsafe for "
+            "untrusted code. Pass opts['allow_unrestricted_devfs']=True (or "
+            "--allow-unrestricted-devfs) only for trusted/manual testing; "
+            "see ROADMAP.md for the real fix (a host-side privileged helper "
+            "to apply devfs ruleset 4 to nested run-jails)."
+        )
 
     # START_RESOLVE_AND_UNPACK
     # ------------------------------------------------------------------
@@ -997,11 +1021,27 @@ async def _run_async(
     # exec there at all. In this mode there is nothing to shadow (binaries are
     # already native) and no Linux ABI to load, so steps 3/4a/4d are skipped.
     # ------------------------------------------------------------------
+    # `thinbase:<name>`: like nativebase, but instead of cloning (ZFS clone or
+    # `cp -a`) a whole copied FreeBSD userland per run, nullfs-ro-binds the
+    # CURRENT system's own base dirs (/bin, /lib, /libexec, /sbin, /usr)
+    # straight from "/" into an EMPTY per-run rootfs. Zero copy, zero disk
+    # cost beyond the run's own scratch dirs. Correct whether jailrun runs
+    # nested inside some other application's jail (in which case "/" is that
+    # jail's own already-provisioned FreeBSD userland) or on a bare FreeBSD
+    # host (where "/" is that host's own userland) -- either way "share the
+    # parent's userland" is exactly the intended semantics, not a hardcoded
+    # path assumption.
+    THIN_BASE_DIRS = ("/bin", "/lib", "/libexec", "/sbin", "/usr")
     native_base: str | None = None
+    thin_base: str | None = None
     if image_ref.startswith("nativebase:"):
         native_base = image_ref.split(":", 1)[1]
+    elif image_ref.startswith("thinbase:"):
+        thin_base = image_ref.split(":", 1)[1]
 
-    if native_base:
+    if thin_base:
+        log.info("thin-jail base (nullfs-shared userland): %s", thin_base)
+    elif native_base:
         log.info("native FreeBSD base: %s", native_base)
         snapshot_id = _store_module.base_snapshot(native_base)
         log.info("snapshot: %s", snapshot_id)
@@ -1016,10 +1056,19 @@ async def _run_async(
 
     # START_CLONE_ROOTFS
     # ------------------------------------------------------------------
-    # 2. Clone → writable rootfs for this run
+    # 2. Clone → writable rootfs for this run (thinbase: an empty scratch dir
+    #    + nullfs-ro binds of the base dirs, instead of a copy/clone)
     # ------------------------------------------------------------------
-    rootfs_path, handle = _store_module.clone(snapshot_id)
-    log.info("rootfs clone: %s (handle=%s)", rootfs_path, handle)
+    if thin_base:
+        rootfs_path, handle = _store_module.empty_rootfs()
+        _store_module.mount(
+            handle,
+            binds=[(d, d, True) for d in THIN_BASE_DIRS if os.path.isdir(d)],
+        )
+        log.info("thin rootfs: %s (handle=%s)", rootfs_path, handle)
+    else:
+        rootfs_path, handle = _store_module.clone(snapshot_id)
+        log.info("rootfs clone: %s (handle=%s)", rootfs_path, handle)
     # END_CLONE_ROOTFS
 
     exit_code = 1  # pessimistic default
@@ -1049,13 +1098,16 @@ async def _run_async(
         # ------------------------------------------------------------------
         # 3. Load substitution manifest (probe+bakery, or cache)
         # ------------------------------------------------------------------
-        if native_base:
-            # Native FreeBSD base: binaries are already native, so there is
-            # nothing to probe or shadow and no Linux ABI to load. An empty
+        if native_base or thin_base:
+            # Native/thin FreeBSD base: binaries are already native, so there
+            # is nothing to probe or shadow and no Linux ABI to load. An empty
             # manifest makes every downstream step (bakery mount, shadow
             # symlinks, _needs_linuxulator) a correct no-op.
             manifest = {}
-            log.info("native base %s: skipping manifest/shadow/Linuxulator", native_base)
+            log.info(
+                "native/thin base (%s): skipping manifest/shadow/Linuxulator",
+                native_base or thin_base,
+            )
         else:
             manifest = _load_manifest(rootfs_path, image_ref)
             log.info(

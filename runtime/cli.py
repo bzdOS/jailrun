@@ -211,6 +211,23 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Disable rctl resource limits (CPU/memory/process/disk-IO). Default on.",
     )
     run_p.add_argument(
+        "--allow-unrestricted-devfs",
+        dest="allow_unrestricted_devfs",
+        action="store_true",
+        default=False,
+        help=(
+            "[SECURITY] Opt in to running with an unrestricted devfs ruleset "
+            "when jailrun itself is nested (running inside a jail). Applying "
+            "devfs ruleset 4 is a host-only privilege a jail cannot delegate "
+            "to its own run-jails, so a nested jailrun defaults to "
+            "REFUSING to run rather than silently exposing /dev/mem etc. to "
+            "the sandboxed command. Verified live: /dev/mem is actually "
+            "readable from inside such an unrestricted run-jail. Pass this "
+            "flag ONLY for trusted/manual testing, never for untrusted-code "
+            "compiles. Default: off (fail closed)."
+        ),
+    )
+    run_p.add_argument(
         "--rctl-rule",
         dest="rctl_rules",
         metavar="ACTION:VALUE",
@@ -496,6 +513,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         "allow_raw_sockets": args.allow_raw_sockets,
         "rctl_enabled": args.rctl_enabled,
         "rctl_rules": args.rctl_rules,
+        "allow_unrestricted_devfs": args.allow_unrestricted_devfs,
     }
     if args.timeout is not None:
         # Only set when given — engine.py's opts.get("timeout", DEFAULT_JEXEC_TIMEOUT_S)
