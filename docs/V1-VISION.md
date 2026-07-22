@@ -97,6 +97,74 @@ differential battery, and promote only on green — keeping N generations of
 snapshots for instant rollback (they're just ZFS snapshots). A toolchain that
 updates itself and is *gated by the test fleet*, not by hope.
 
+## Warm process migration — not "live", be precise about what this is
+
+### 6b. Process teleport: disk + memory, no network, no kernel
+FreeBSD has no CRIU-equivalent, and full transparent live migration (open TCP
+connections surviving a host move without the client noticing) genuinely
+needs kernel-level support FreeBSD doesn't have: Linux only got this via
+`TCP_REPAIR`, a facility its network-stack maintainers spent years building
+and stabilizing specifically for CRIU, letting a socket's internal TCB state
+(sequence numbers, window, SACK/timestamp options) be set directly from
+outside the normal handshake. There is no equivalent on FreeBSD, and a
+homegrown kernel module poking at `struct tcpcb` internals directly would be
+a serious, novel, host-crash-risking kernel networking project — not
+something to bundle into jailrun.
+
+**But dropping one requirement changes everything: don't insist that open
+sockets survive.** Accept that a migrated process's network connections
+break and its clients reconnect — the same failure mode any client already
+needs to tolerate for a network blip, and exactly how Kubernetes pod
+rescheduling or database replica failover already work in practice. Once
+sockets are allowed to break, the *kernel-networking piece disappears
+entirely* — nothing here needs a kernel module:
+
+- **Disk** — §5b's first-class ZFS state dataset, `zfs send` incrementally
+  while the workload still runs, tiny final delta at cutover.
+- **Memory** — a userspace `ptrace(2)`-based dumper/restorer: `PT_ATTACH` to
+  pause the process, `sysctl KERN_PROC_VMMAP` for the memory map, read each
+  mapped region's contents, read register state (general-purpose and
+  FPU/vector). Restore: create a stub process on the target, map the same
+  regions back at the same addresses, set registers via `ptrace`, resume.
+  Every primitive here already exists in stock FreeBSD — no kernel changes.
+- **Network** — nothing to build. The process resumes with its sockets in an
+  error state; well-behaved clients/services reconnect.
+
+**What this actually buys, honestly measured against "real" live migration:**
+most of the *practical* value (a workload moves with its warm in-memory state
+intact — caches, accumulated aggregates, in-flight computation — not a cold
+restart that has to rebuild all of that from scratch) for a fraction of the
+engineering cost and with zero kernel risk. What it does NOT buy: connection
+transparency. Call it "process teleport" or "warm restart", never "live
+migration" — the name should not claim continuity this design deliberately
+gives up.
+
+**Where this matters and where it doesn't:** low value for jailrun's current
+ephemeral-build use case (an interrupted `ninja`/`make` build already resumes
+cheaply from on-disk incremental state — see §5b — there's little point
+teleporting a compiler's half-finished in-memory state). Real value only
+shows up for a longer-running, stateful workload with in-memory state that's
+expensive to rebuild (a large warmed cache, accumulated in-process
+aggregates) — the same category of workload §5b's persistent-dataset model
+targets. The two ideas are companions: §5b moves durable state, this moves
+transient-but-valuable state, neither touches live connections.
+
+**Honest remaining limits**, not glossed over: multi-threaded processes are
+much harder to restore correctly than a single-threaded or single-event-loop
+one (scope the first version to the latter); non-socket file descriptors
+(pipes, shared memory, mmap'd files) still need per-type restore handling,
+though each is lower-stakes than a live external TCP peer; source and target
+must match CPU architecture and have ASLR controlled/matched so restored
+memory maps land at consistent addresses. None of these are kernel-risk
+problems — they're bounded, ordinary systems engineering.
+
+**Why it's worth doing anyway:** FreeBSD has no checkpoint/restore tool for
+jails at all today. Even this narrowed scope — disk + memory, no network —
+would be the first of its kind in the ecosystem, a genuinely novel
+differentiator that stacks alongside (not against) the substitution-manifest
+thesis: another "FreeBSD does something Linux container tooling can't, or
+does worse" story, achievable with zero kernel patches or modules.
+
 ## Speed of the dev loop
 
 ### 7. Instant dev mode
@@ -152,14 +220,17 @@ community-replacement mechanism.
 
 ## Honest constraints on the fantasy
 
-- **No live jail migration between hosts.** FreeBSD has no CRIU-equivalent;
-  process memory does not travel. What travels is the filesystem (zfs send)
-  plus a restart — good enough for CI job rescheduling, not for "moving" a
-  running process. To be precise about the distinction §5b draws: this is a
-  *memory/process-continuity* gap, not a *data-durability* gap — §5b already
-  handles durable state (disk) via zfs send + the workload's own crash
-  recovery. Live migration of a process's live RAM, open connections, or warm
-  in-memory state remains unsolved and out of scope for v1.
+- **No *transparent* live jail migration between hosts.** FreeBSD has no
+  CRIU-equivalent, and open TCP connections surviving a host move without the
+  client noticing needs kernel support (Linux's `TCP_REPAIR`) that FreeBSD
+  doesn't have — closing that gap would mean serious, host-crash-risking
+  kernel networking work, deliberately out of scope. This is a precise,
+  narrower gap than it sounds: §5b already moves durable state (disk, via
+  zfs send + the workload's own crash recovery), and §6b already moves warm
+  in-memory state (via userspace `ptrace`, no kernel involved) — what's
+  actually unsolved, by design rather than by limitation, is connection
+  *continuity*: sockets break on a §6b teleport and clients must reconnect.
+  That's an accepted trade, not a missing feature.
 - **A WASM substitution tier** (between native and Linuxulator) is only real
   where upstream sources exist to recompile — it's a rung on the ladder, not
   a universal fallback.
