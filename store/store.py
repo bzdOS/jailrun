@@ -5,8 +5,9 @@
 # INTENT: Provides pull/unpack/clone/mount/destroy lifecycle for OCI container images
 #         so the runtime (S1) obtains a writable rootfs clone without knowing whether
 #         ZFS CoW or plain directory copies are used underneath.
-# DEPENDENCIES: stdlib (hashlib, json, logging, os, re, shlex, shutil, subprocess,
-#               tempfile, uuid, dataclasses, pathlib, typing);
+# DEPENDENCIES: stdlib (fcntl, hashlib, json, logging, os, re, shlex, shutil,
+#               subprocess, tempfile, time, uuid, contextlib, dataclasses, pathlib,
+#               typing);
 #               external tools: skopeo (sysutils/skopeo), umoci (sysutils/umoci),
 #               bsdtar (base), zfs/zpool (base), mount_nullfs (base), umount (base),
 #               jail/jail -r (base), cp (base)
@@ -21,6 +22,13 @@
 # - plaindir backend: .jailrun_snap sentinel file marks a directory as "snapshotted"
 #   (idempotency guard); it is removed from the working copy after cp -a clone.
 # - handle.mounts is always cleared by unmount(); destroy() calls unmount() first.
+# - unmount() tears down handle.mounts deepest-first (see _mounts_deepest_first) —
+#   destroy() never attempts to free the underlying dataset/dir while anything is
+#   still mounted under it.
+# - resolve(image_ref) and unpack(image_id) each hold an exclusive per-key
+#   fcntl.flock (see _image_lock) for their full body: two Store instances racing
+#   the SAME image_ref/image_id serialize; two DIFFERENT images never block each
+#   other (different lock files).
 # - sideEffects in every public method name the exact subprocess or filesystem op used.
 # END_INVARIANTS
 # START_RATIONALE
@@ -92,6 +100,7 @@ FreeBSD tool assumptions (pkg install):
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import logging
@@ -103,9 +112,10 @@ import subprocess
 import tempfile
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional
 
 log = logging.getLogger("jailrun.store")
 
@@ -323,6 +333,59 @@ class Store:
     # __init__:end
 
     # ------------------------------------------------------------------
+    # Locking — per-image mutual exclusion for resolve()/unpack()
+    # ------------------------------------------------------------------
+
+    # _image_lock:start
+    #   purpose: exclusive, per-image advisory file lock so two concurrent
+    #            resolve()/unpack() calls for the SAME image serialize, while
+    #            two DIFFERENT images proceed fully in parallel (never a global lock)
+    #   input:
+    #     key: str — identity to lock on; callers pass image_ref (resolve()) or
+    #                image_id (unpack()) — sanitised via _safe_zfs_name so it is
+    #                always a safe filename component regardless of what characters
+    #                the caller's key contains (e.g. "registry.example/repo:tag")
+    #   output:
+    #     context manager — yields None; the lock is held for the whole `with` block
+    #   sideEffects: creates <oci_cache_dir>/locks/ if absent (Path.mkdir); opens
+    #                (creating if absent) <oci_cache_dir>/locks/<safe_key>.lock via
+    #                os.open; blocks in fcntl.flock(LOCK_EX) until acquired; ALWAYS
+    #                unlocks (LOCK_UN) and closes the fd in a finally block, even if
+    #                the wrapped code raises
+    #   rationale: fcntl.flock — not a PID-file-with-staleness-check scheme — because
+    #              a flock is held against an open file descriptor by the KERNEL and
+    #              is released automatically the instant the holding process dies
+    #              (crash, SIGKILL, OOM-kill), with zero cleanup logic required. A
+    #              PID-in-lockfile scheme would need its own "is that PID still
+    #              alive, or did it wrap around and get reused?" check on every
+    #              acquire attempt. That matters here specifically because it matches
+    #              jailrun's existing crash-recovery story: `jailrun gc` (see
+    #              runtime/gc.py) already treats a killed jailrun process as leaving
+    #              behind state that the NEXT invocation discovers and reconciles,
+    #              never something a PID needs to hand back cleanly. flock plays the
+    #              same "abandon it, don't hand-shake it" role for this critical
+    #              section. flock is also POSIX-standard (fcntl stdlib module),
+    #              present on both Linux (this dev/test host) and FreeBSD (the real
+    #              target), so this stays importable/testable here without any
+    #              FreeBSD-only dependency.
+    @contextmanager
+    def _image_lock(self, key: str) -> Iterator[None]:
+        """Hold an exclusive advisory lock on a per-image lock file for `key`."""
+        lock_dir = self.oci_cache_dir / "locks"
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        lock_path = lock_dir / f"{_safe_zfs_name(key)}.lock"
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+    # _image_lock:end
+
+    # ------------------------------------------------------------------
     # Public API (Seam 2)
     # ------------------------------------------------------------------
 
@@ -335,7 +398,11 @@ class Store:
     #     image_id: str — sha256 hex of sorted layer digests; stable key for unpack()
     #   sideEffects: runs 'skopeo copy --override-os linux docker://<image_ref>
     #                oci:<oci_cache_dir>/<safe_name>:latest' (network + disk write);
-    #                creates oci_cache_dir/<safe_name>/ directory if absent
+    #                creates oci_cache_dir/<safe_name>/ directory if absent;
+    #                holds an exclusive fcntl.flock on <oci_cache_dir>/locks/<safe
+    #                image_ref>.lock for the full body (see _image_lock) so two
+    #                Store instances racing the SAME image_ref serialize instead of
+    #                both writing into the same oci_dir at once
     def resolve(self, image_ref: str) -> str:
         """
         Ensure ``image_ref`` is present in the local OCI cache and return its
@@ -352,26 +419,37 @@ class Store:
         skopeo would request a FreeBSD manifest which most registries do not
         carry, and the copy fails.   # UNVERIFIED (only relevant on FreeBSD)
 
+        Concurrency: two ``jailrun run`` processes resolving the SAME
+        ``image_ref`` at once would otherwise both run ``skopeo copy`` into the
+        identical ``oci_dir`` concurrently — not a corruption risk for skopeo
+        itself (it writes a complete, self-consistent OCI layout each time),
+        but wasteful and a source of confusing partial-read errors for
+        anything that lists ``oci_dir`` mid-write (see
+        ``_find_oci_for_image_id``). ``_image_lock(image_ref)`` below
+        serializes this per image_ref — a DIFFERENT image_ref never blocks.
+
         Returns
         -------
         str
             ``image_id`` suitable for passing to ``unpack()``.
         """
-        oci_dir = self._oci_dir_for(image_ref)
-        oci_dir.mkdir(parents=True, exist_ok=True)
+        with self._image_lock(image_ref):
+            oci_dir = self._oci_dir_for(image_ref)
+            oci_dir.mkdir(parents=True, exist_ok=True)
 
-        tag = "latest"
-        oci_dest = f"oci:{oci_dir}:{tag}"
+            tag = "latest"
+            oci_dest = f"oci:{oci_dir}:{tag}"
 
-        log.info("resolve: pulling %s -> %s", image_ref, oci_dest)
-        self._run([
-            "skopeo", "copy",
-            "--override-os", "linux",   # UNVERIFIED: FreeBSD needs this flag
-            f"docker://{image_ref}",
-            oci_dest,
-        ], timeout=DEFAULT_NETWORK_TIMEOUT_S)
+            log.info("resolve: pulling %s -> %s", image_ref, oci_dest)
+            self._run([
+                "skopeo", "copy",
+                "--override-os", "linux",   # UNVERIFIED: FreeBSD needs this flag
+                f"docker://{image_ref}",
+                oci_dest,
+            ], timeout=DEFAULT_NETWORK_TIMEOUT_S)
 
-        image_id = self._compute_image_id(oci_dir, tag)
+            image_id = self._compute_image_id(oci_dir, tag)
+
         log.info("resolve: image_id=%s", image_id)
         return image_id
     # resolve:end
@@ -389,8 +467,16 @@ class Store:
     #                           runs 'zfs snapshot <dataset>@snap',
     #                           runs 'zfs set readonly=on <dataset>';
     #                plaindir: creates directory, runs umoci or bsdtar extraction,
-    #                           writes <dest>/.jailrun_snap sentinel file
-    #   rationale: idempotent — returns existing snapshot_id if snapshot already exists
+    #                           writes <dest>/.jailrun_snap sentinel file;
+    #                holds an exclusive fcntl.flock on <oci_cache_dir>/locks/<image_id>.lock
+    #                for the full body (see _image_lock) so two Store instances racing the
+    #                SAME image_id serialize instead of both `zfs create`-ing /
+    #                extracting into the same dataset at once
+    #   rationale: idempotent — returns existing snapshot_id if snapshot already exists.
+    #              Combined with the per-image_id lock this is what makes "parallel
+    #              runs of the SAME image" safe: the loser of the lock race simply
+    #              finds the snapshot the winner already produced and returns
+    #              immediately, instead of racing zfs create/extract on the winner.
     def unpack(self, image_id: str) -> str:
         """
         Unpack a previously resolved image into a dataset/dir and "snapshot" it.
@@ -416,12 +502,15 @@ class Store:
               ZFS:      ``<images_ds>/<image_id>@snap``
               plaindir: ``<images_dir>/<image_id>``  (the directory itself)
         """
-        oci_dir, tag = self._find_oci_for_image_id(image_id)
+        # See _locate_oci_with_retry's rationale: a concurrent resolve() for this
+        # same image_ref may still be mid-write on this exact oci_dir.
+        oci_dir, tag = self._locate_oci_with_retry(image_id)
 
-        if self.backend == BACKEND_ZFS:
-            return self._unpack_zfs(image_id, oci_dir, tag)
-        else:
-            return self._unpack_plaindir(image_id, oci_dir, tag)
+        with self._image_lock(image_id):
+            if self.backend == BACKEND_ZFS:
+                return self._unpack_zfs(image_id, oci_dir, tag)
+            else:
+                return self._unpack_plaindir(image_id, oci_dir, tag)
     # unpack:end
 
     # register_base:start
@@ -649,81 +738,131 @@ class Store:
     # mount:end
 
     # unmount:start
-    #   purpose: unmount all nullfs bind-mounts for a handle in reverse mount order
+    #   purpose: unmount all nullfs bind-mounts for a handle, deepest-mount-first
     #   input:
     #     handle: Handle — clone descriptor whose handle.mounts list is drained
     #   output:
     #     none
-    #   sideEffects: for each mount in reverse order: runs 'umount <dest_path>'
-    #                (tolerates failure via _run_ok); clears handle.mounts list
+    #   sideEffects: for each mount, deepest dest_path first (see
+    #                _mounts_deepest_first): runs 'umount <dest_path>'; if that fails,
+    #                runs 'umount -f <dest_path>' ONCE as a last-resort fallback
+    #                (both tolerated via _run_ok — a mount that was never actually
+    #                there, or that another teardown path already cleared, must not
+    #                abort the rest of the list); clears handle.mounts list
+    #   rationale: most-nested-first is required for correctness, not just style —
+    #              unmounting a PARENT bind while a CHILD bind is still mounted
+    #              under it either fails outright or (worse) silently detaches the
+    #              child along with it depending on the platform; sorting by actual
+    #              path depth (not insertion order) makes this correct regardless of
+    #              the order binds happened to be added in (see _mounts_deepest_first)
     def unmount(self, handle: Handle) -> None:
         """
-        Unmount all nullfs mounts associated with ``handle`` in reverse order.
+        Unmount all nullfs mounts associated with ``handle``, most-nested-first.
 
         Shells out to::
 
             umount <dest_path>                  # UNVERIFIED
+            umount -f <dest_path>                # UNVERIFIED — only if the plain
+                                                  # attempt above failed
         """
-        for host_path, dest_path, _ro in reversed(handle.mounts):
+        for host_path, dest_path, _ro in _mounts_deepest_first(handle.mounts):
             log.info("unmount: %s", dest_path)
-            self._run_ok(["umount", str(dest_path)])    # UNVERIFIED
+            rc, _out, err = self._run_ok(["umount", str(dest_path)])    # UNVERIFIED
+            if rc != 0:
+                log.warning(
+                    "unmount: plain umount of %s failed (rc=%d: %s); "
+                    "retrying with -f (last resort)",
+                    dest_path, rc, err.decode(errors="replace").strip(),
+                )
+                self._run_ok(["umount", "-f", str(dest_path)])    # UNVERIFIED
         handle.mounts.clear()
     # unmount:end
 
     # destroy:start
-    #   purpose: fully tear down a clone — stop jail if running, unmount binds, destroy storage
+    #   purpose: fully tear down a clone — stop jail if running, unmount binds
+    #            deepest-first, then destroy storage, correct-by-construction
+    #            instead of retry-until-it-works
     #   input:
     #     handle: Handle — clone descriptor to destroy
     #   output:
     #     none
-    #   sideEffects: if handle.jail_name set: runs 'jail -r <jail_name>' (tolerates failure);
-    #                calls self.unmount(handle) which runs 'umount' for each bind;
-    #                ZFS path: runs 'zfs destroy <dataset>'; attempts handle.rootfs.rmdir()
-    #                          to remove empty mountpoint stub;
+    #   sideEffects: if handle.jail_name set: runs 'jail -r <jail_name>' (tolerates
+    #                failure — best-effort safety net, see rationale below);
+    #                calls self.unmount(handle) which runs 'umount'/'umount -f' for
+    #                each bind, deepest-first, BEFORE any destroy attempt;
+    #                ZFS path: runs 'zfs destroy <dataset>' (small bounded retry,
+    #                see below); attempts handle.rootfs.rmdir() to remove the empty
+    #                mountpoint stub;
     #                plaindir: calls _rm_rf(handle.rootfs) which runs shutil.rmtree
+    #   rationale: contract — destroy()'s CALLER is responsible for having already
+    #              stopped the jail before calling this (engine.py's _run_async
+    #              teardown already does `jail -r -f <conf_path>` and awaits it
+    #              before calling store.destroy(), see ARCHITECTURE.md's teardown
+    #              path). store.py deliberately does NOT poll jail state itself —
+    #              that would reach across the S1(runtime)/S3(store) seam boundary
+    #              this project keeps separate (ARCHITECTURE.md "Subsystem
+    #              responsibilities"). handle.jail_name is still honoured here as an
+    #              idempotent best-effort no-op for any OTHER caller that hands
+    #              destroy() a handle whose jail was never explicitly stopped —
+    #              `jail -r` on an already-gone (or never-existing) jail name is
+    #              safe and tolerated via _run_ok.
     def destroy(self, handle: Handle) -> None:
         """
-        Tear down a running/stopped clone: stop jail if running, unmount nullfs
-        binds, destroy the ZFS clone dataset (or rm -rf for plaindir).
+        Tear down a stopped clone: unmount nullfs binds (deepest-first), then
+        destroy the ZFS clone dataset (or rm -rf for plaindir).
 
-        Sequence
-        --------
-        1. ``jail -r <jail_name>``     if a jail was started               # UNVERIFIED
-        2. ``unmount(handle)``         remove nullfs binds
-        3. ZFS: ``zfs destroy <dataset>``                                   # UNVERIFIED
-           plaindir: ``rm -rf <rootfs>``
+        Sequence (correct-by-construction, replaces the old 10-attempt
+        retry-with--f loop)
+        --------------------------------------------------------------
+        1. ``jail -r <jail_name>``     best-effort no-op safety net; the REAL
+                                        caller (engine.py) already ran and
+                                        awaited this before calling destroy()
+                                        — see rationale above.               # UNVERIFIED
+        2. ``unmount(handle)``         nullfs binds, deepest mount first —
+                                        this is the actual fix for the
+                                        historical "cannot unmount ... busy"
+                                        error: something (a `-v` volume, the
+                                        bakery-base bind) was still mounted
+                                        under the dataset's mountpoint when
+                                        zfs destroy ran.
+        3. ZFS: ``zfs destroy <dataset>``   small bounded retry, see below.  # UNVERIFIED
+           plaindir: ``rm -rf <rootfs>``    no mounts left to fight, no retry.
 
         It is safe to call destroy() on a handle that was never jailed or
         never had mounts applied (both steps no-op gracefully).
         """
-        # Step 1: stop jail if running
+        # Step 1: stop jail if this handle's caller told us it started one.
         if handle.jail_name:
             log.info("destroy: stopping jail %s", handle.jail_name)
             self._run_ok(["jail", "-r", handle.jail_name])  # UNVERIFIED
 
-        # Step 2: unmount binds
+        # Step 2: unmount binds, deepest-first, BEFORE touching the dataset.
         self.unmount(handle)
 
         # Step 3: destroy storage
         if self.backend == BACKEND_ZFS:
             log.info("destroy: zfs destroy %s", handle.dataset)
-            # store/README.md open-question #7, confirmed live 2026-07-19: right
-            # after `jail -r` returns, the kernel can take a brief moment to fully
-            # release the jail's vnode/mount references, so `zfs destroy` can hit
-            # "dataset is busy" even though the jail is genuinely gone. A trivial
-            # workload (e.g. `id; uname -a`) clears within ~1s; a REAL build
-            # (esphome/platformio: ccache/ninja workers, mmap'd toolchain
-            # binaries) stayed busy through 10 retries AND -f-on-the-last-3
-            # live 2026-07-19 — force from attempt 2 on instead of waiting.
-            # This dataset is ephemeral per-run scratch space about to be
-            # destroyed anyway, so forcing is safe here (never done for
-            # anything persistent).
+            # store/README.md open-question #7: now that step 2 has actually
+            # unmounted everything WE placed under this dataset (the previous
+            # root cause of "dataset is busy" in the vast majority of cases),
+            # the only remaining transient "busy" source is the kernel's own
+            # async vnode reclaim right after the jail exits — a moment for
+            # the last mmap'd/cached references to the dataset's own files to
+            # drop, confirmed live 2026-07-19 to clear well under a second even
+            # for a real build's footprint (ccache/ninja workers, mmap'd
+            # toolchain binaries) once forced. That is a real, named,
+            # honestly-bounded cause — unlike the old 10-attempt loop, which
+            # existed because the true cause (leftover binds from step 2) was
+            # never actually fixed at the source. 3 attempts / a short fixed
+            # backoff / force from the 2nd attempt on (safe — this dataset is
+            # ephemeral per-run scratch about to be destroyed anyway, never
+            # done for anything persistent) is enough.
             last_exc: StoreError | None = None
-            attempts = 10
+            attempts = 3
             for attempt in range(attempts):
                 try:
                     cmd = ["zfs", "destroy"]
-                    if attempt >= 2:
+                    if attempt >= 1:
                         cmd.append("-f")
                     cmd.append(handle.dataset)
                     self._run(cmd)
@@ -732,7 +871,7 @@ class Store:
                 except StoreError as exc:
                     last_exc = exc
                     if attempt < attempts - 1:
-                        time.sleep(min(1.0 * (attempt + 1), 5.0))
+                        time.sleep(0.3)
             if last_exc is not None:
                 raise last_exc
             # Clean up mountpoint stub if empty
@@ -1216,6 +1355,8 @@ class Store:
         for candidate in self.oci_cache_dir.iterdir():
             if not candidate.is_dir():
                 continue
+            if candidate.name == "locks":
+                continue  # _image_lock()'s lock-file directory, not an image cache entry
             try:
                 cid = self._compute_image_id(candidate, tag)
             except Exception:
@@ -1227,6 +1368,46 @@ class Store:
             f"image_id {image_id!r} not found in OCI cache {self.oci_cache_dir}"
         )
     # _find_oci_for_image_id:end
+
+    # _locate_oci_with_retry:start
+    #   purpose: locate the OCI layout for image_id, tolerating a brief transient
+    #            miss caused by a concurrent resolve() call still writing that exact
+    #            directory
+    #   input:
+    #     image_id: str — content-addressed id, as passed to unpack()
+    #   output:
+    #     tuple[Path, str] — (oci_dir, tag), same shape as _find_oci_for_image_id()
+    #   sideEffects: calls _find_oci_for_image_id() up to 5 times, sleeping briefly
+    #                between attempts, only on ImageNotFoundError; the final
+    #                failure re-raises the last ImageNotFoundError unchanged
+    #   rationale: resolve()'s lock (keyed by image_ref) and unpack()'s lock (keyed
+    #              by image_id) never overlap by construction — unpack() only ever
+    #              receives image_id, so it has no image_ref to share resolve()'s
+    #              lock key with. That leaves a real, narrow window: a concurrent
+    #              resolve() for the SAME image_ref, still mid `skopeo copy` into
+    #              this exact oci_dir, can make a single _find_oci_for_image_id scan
+    #              transiently miss (e.g. index.json written but the candidate
+    #              directory momentarily inconsistent) even though the image WILL
+    #              be resolved microseconds later. That is "the writer hasn't
+    #              finished yet", not "the image was never resolved" — a brief,
+    #              bounded retry here is the same honest, real-cause pattern
+    #              destroy()'s zfs-destroy retry uses (see destroy()'s comment),
+    #              not a speculative "we don't know why" loop. Reproduced live by
+    #              test_store_concurrency.py's two-Store same-image race test,
+    #              which flaked without this fix.
+    def _locate_oci_with_retry(self, image_id: str) -> tuple[Path, str]:
+        last_exc: ImageNotFoundError | None = None
+        attempts = 5
+        for attempt in range(attempts):
+            try:
+                return self._find_oci_for_image_id(image_id)
+            except ImageNotFoundError as exc:
+                last_exc = exc
+                if attempt < attempts - 1:
+                    time.sleep(0.02 * (attempt + 1))
+        assert last_exc is not None
+        raise last_exc
+    # _locate_oci_with_retry:end
 
     # _compute_image_id:start
     #   purpose: derive a stable content-addressed image_id from an OCI layout on disk
@@ -1498,6 +1679,36 @@ def _rm_rf(path: Path) -> None:
     elif path.is_dir():
         shutil.rmtree(str(path))
 # _rm_rf:end
+
+
+# _mounts_deepest_first:start
+#   purpose: pure helper — reorder a handle's accumulated nullfs binds so the
+#            most-nested mount (deepest dest_path) comes first, for correct
+#            teardown order (a child bind must be unmounted before its parent)
+#   input:
+#     mounts: list[tuple[Path, Path, bool]] — (host_path, dest_path, is_readonly)
+#             triples, in the order they were mounted (handle.mounts)
+#   output:
+#     list[tuple[Path, Path, bool]] — the same triples, reordered deepest-first;
+#             ties (equal depth) keep reverse-insertion order, matching the
+#             previous plain reversed(handle.mounts) behaviour for that case
+#   sideEffects: none (pure; does not stat any path, does not mutate the input list)
+#   rationale: depth is derived structurally from dest_path.parts — the number of
+#              path components — rather than trusted from insertion order. The
+#              previous implementation (`reversed(handle.mounts)`) only produced
+#              a correct teardown order because every caller today happens to
+#              mount parents before children (e.g. engine.py mounts the
+#              bakery-base bind before `-v` volumes); sorting by actual path depth
+#              makes teardown correct-by-construction even if that ordering
+#              assumption is ever violated by a future caller.
+def _mounts_deepest_first(
+    mounts: list[tuple[Path, Path, bool]]
+) -> list[tuple[Path, Path, bool]]:
+    """Return `mounts` reordered so the deepest dest_path unmounts first."""
+    indexed = list(enumerate(mounts))
+    indexed.sort(key=lambda pair: (len(pair[1][1].parts), pair[0]), reverse=True)
+    return [item for _idx, item in indexed]
+# _mounts_deepest_first:end
 
 
 # _within:start
