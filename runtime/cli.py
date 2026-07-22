@@ -3,10 +3,10 @@
 # PURPOSE: docker-run-compatible CLI argument parser and subcommand dispatcher for jailrun
 # INTENT: front-door for the jailrun binary; keeps parsing logic isolated so engine.py
 #         and lifecycle.py have no argparse dependency and can be imported in tests
-# DEPENDENCIES: stdlib (argparse, sys, subprocess, json); runtime.engine.run;
+# DEPENDENCIES: stdlib (argparse, sys, sqlite3, json); runtime.engine.run;
 #               runtime.engine._store_module/_load_manifest (explain IMAGE path);
 #               runtime.explain.render_explain; runtime.lifecycle.Lifecycled;
-#               no external tools invoked here
+#               runtime.rundb.RunDB (ps); no external tools invoked here
 # PUBLIC_API: main(argv) -> int
 # END_AI_HEADER
 
@@ -15,7 +15,7 @@ jailrun CLI — docker-run-compatible argument parser for the jailrun runtime.
 
 Entry point: `jailrun` dispatches to subcommands:
   jailrun run [FLAGS] IMAGE [CMD [ARGS...]]
-  jailrun ps
+  jailrun ps [--all]
   jailrun explain [--manifest FILE | IMAGE] [--format text|json]
   jailrun version
 
@@ -220,13 +220,21 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     # ---- ps -----------------------------------------------------------------
-    sub.add_parser(
+    ps_p = sub.add_parser(
         "ps",
-        help="List running jailrun containers (stub)",
+        help="List jailrun-managed jail runs",
         description=(
-            "List running jailrun containers.\n"
-            "STUB: queries `jls -n` and filters by jailrun-managed names."
+            "List jailrun-managed jail runs from the run-state db\n"
+            "(runtime/rundb.py). Shows only 'running' rows by default;\n"
+            "pass --all to include exited/killed history."
         ),
+    )
+    ps_p.add_argument(
+        "-a", "--all",
+        dest="all",
+        action="store_true",
+        default=False,
+        help="Show all runs, including exited/killed (default: running only).",
     )
 
     # ---- explain --------------------------------------------------------
@@ -410,22 +418,76 @@ def _cmd_explain(args: argparse.Namespace) -> int:
     return 0
 
 
-# _cmd_ps:start
-#   purpose: print a stub container listing header and placeholder row to stdout
+# _render_ps_table:start
+#   purpose: format run-state rows as a docker-ps-style table (pure, no I/O)
 #   input:
-#     _args: argparse.Namespace — unused (no flags for ps yet)
+#     rows: list[dict] — rows as returned by runtime.rundb.RunDB.list_runs()
+#           (keys: jail_name, image, image_digest, dataset, status, exit_code,
+#           started_at, ended_at); missing keys tolerated (rendered as "")
 #   output:
-#     exit_code: int — always 0
-#   sideEffects: writes two lines to stdout via print(); stub does not invoke jls(8)
-#   rationale: real impl would run 'jls -n name path' and filter by jailrun-managed names;
-#              stub exists so 'jailrun ps' parses and exits cleanly on a Linux dev host
+#     table: str — header line "JAIL  IMAGE  STATUS  STARTED" followed by one
+#            line per row, columns space-padded to the widest cell; header-only
+#            (no data lines) when rows is empty
+#   sideEffects: none (pure formatting; factored out so tests can exercise the
+#                rendering shape without touching a real db)
+# _render_ps_table:end
+def _render_ps_table(rows: list[dict]) -> str:
+    """Format run-state rows as a docker-ps-style table. Pure; no I/O."""
+    headers = ("JAIL", "IMAGE", "STATUS", "STARTED")
+    table_rows = [
+        (
+            str(r.get("jail_name", "")),
+            str(r.get("image", "")),
+            str(r.get("status", "")),
+            str(r.get("started_at", "")),
+        )
+        for r in rows
+    ]
+
+    widths = [len(h) for h in headers]
+    for row in table_rows:
+        for i, cell in enumerate(row):
+            widths[i] = max(widths[i], len(cell))
+
+    def _fmt(cells: tuple) -> str:
+        return "   ".join(cell.ljust(widths[i]) for i, cell in enumerate(cells))
+
+    lines = [_fmt(headers)]
+    lines.extend(_fmt(row) for row in table_rows)
+    return "\n".join(lines)
+
+
+# _cmd_ps:start
+#   purpose: list jailrun-managed runs from the run-state db and print a
+#            docker-ps-style table
+#   input:
+#     args: argparse.Namespace — parsed flags from the 'ps' subparser (all: bool)
+#   output:
+#     exit_code: int — always 0 (an absent/unreadable db is treated as "no runs
+#                yet", not a failure — see sideEffects)
+#   sideEffects: imports runtime.rundb.RunDB (lazy, matching the other _cmd_*
+#                handlers) and calls .list_runs(status=None if args.all else
+#                'running'), which may open/create the sqlite db at JAILRUN_DB
+#                (default /var/db/jailrun/runs.db); if that raises
+#                (OSError/sqlite3.Error — e.g. db path absent/unwritable on a
+#                plain dev host) the error is swallowed here and treated as an
+#                empty run list so `jailrun ps` still prints a clean header and
+#                exits 0. Writes the rendered table to stdout via print().
 # _cmd_ps:end
-def _cmd_ps(_args: argparse.Namespace) -> int:
-    """STUB: list running jailrun-managed jails."""
-    import subprocess  # noqa: PLC0415
-    print("CONTAINER ID   IMAGE          STATUS   COMMAND")
-    # Real impl: `jls -n name path | grep jailrun-` and format.
-    print("(stub — run 'jls' on freebsd-host for live data)")  # UNVERIFIED
+def _cmd_ps(args: argparse.Namespace) -> int:
+    """List jailrun-managed runs from the run-state db; print a ps-style table."""
+    import sqlite3  # noqa: PLC0415
+    from runtime.rundb import RunDB  # noqa: PLC0415
+
+    try:
+        db = RunDB()
+        rows = db.list_runs(status=None if args.all else "running")
+    except (OSError, sqlite3.Error):
+        # No db yet (fresh host, /var/db not writable, etc.) — that just means
+        # nothing has run through jailrun here yet, not a CLI failure.
+        rows = []
+
+    print(_render_ps_table(rows))
     return 0
 
 
