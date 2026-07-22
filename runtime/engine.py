@@ -11,6 +11,8 @@
 #               bakery (S4 seam — fills native.artifact_path in the manifest);
 #               runtime._mocks (fallback stubs when real seams are absent);
 #               runtime.lifecycle (bsdos_lifecycled teardown, imported lazily);
+#               runtime.rundb (RunDB run-state ledger, imported lazily — see the
+#               record_start/record_exit call sites in _run_async);
 #               FreeBSD system tools: jail(8), jexec(8), kldload(8), nullfs(5)
 # PUBLIC_API: run(image_ref, cmd, opts) -> int
 # END_AI_HEADER
@@ -22,6 +24,10 @@
 # - The jail is started in persist mode; it is always removed in the finally block
 #   regardless of whether jexec succeeded.
 # - kldload linux64 is called with check=False (idempotent; already-loaded is fine).
+# - RunDB.record_start()/record_exit() calls are wrapped in their own try/except
+#   (defense in depth on top of RunDB's own internal error handling): a broken
+#   run-state ledger must NEVER prevent a jail from starting, running, or
+#   tearing down (see runtime/rundb.py's module NOTE — this is that deferred wiring).
 # END_INVARIANTS
 
 # START_RATIONALE
@@ -856,9 +862,13 @@ def run(image_ref: str, cmd: list[str], opts: dict[str, Any]) -> int:
 #     - creates mountpoint directories under rootfs for Linuxulator pseudo-filesystems
 #     - writes a temporary jail.conf file via tempfile.NamedTemporaryFile
 #     - runs subprocess `jail -f <conf_path> -c <jail_name>` to start the jail
+#     - calls RunDB().record_start(jail_name, ...) right after `jail -c` succeeds
+#       (best-effort — see runtime/rundb.py; never raises out of this function)
 #     - runs jexec via _stream_jexec() — runs command inside the jail
 #     - runs subprocess `jail -r <jail_name>` to remove the jail (always, in finally)
 #     - calls runtime.lifecycle.teardown(jail_name) if lifecycled is present
+#     - calls RunDB().record_exit(jail_name, ...) in the finally block, iff a
+#       record_start was ever attempted (best-effort — never raises)
 #     - calls _store_module.destroy(handle) when opts.rm is True
 async def _run_async(
     image_ref: str,
@@ -923,6 +933,16 @@ async def _run_async(
     exit_code = 1  # pessimistic default
     jail_name: str | None = None
     conf_path: str | None = None
+    # jail_created gates record_exit(): only meaningful if record_start was
+    # ever attempted (i.e. `jail -c` actually succeeded). run_completed
+    # distinguishes the two terminal outcomes RunDB can express for a created
+    # jail: True means _stream_jexec returned a real exit code normally
+    # ("exited"); False means the jail was torn down some other way — the
+    # jexec timeout path (see _stream_jexec) or any other exception raised
+    # after jail creation — for which "killed" is the closest fit RunDB's
+    # CHECK-constrained status column offers.
+    jail_created = False
+    run_completed = False
 
     try:
         # START_LOAD_MANIFEST
@@ -1057,6 +1077,30 @@ async def _run_async(
         # Start the jail (persist mode: jail stays up until we destroy it).
         await _run_subprocess(["jail", "-f", conf_path, "-c", jail_name])
         log.info("jail %s created", jail_name)
+        jail_created = True
+
+        # Record the run start for `jailrun ps` (runtime/rundb.py). Imported
+        # lazily so engine.py stays importable/testable without a real db.
+        # image_digest uses snapshot_id — the one image identifier available
+        # on BOTH the native-base and normal-image code paths above (image_id
+        # is only bound in the normal-image branch). dataset uses handle.dataset
+        # (the ZFS dataset name / plaindir path from store.clone()'s Handle),
+        # not rootfs_path — either is a legitimate fit per rundb.py's own field
+        # docstring ("ZFS dataset / rootfs path backing this run").
+        # [DEFENSE IN DEPTH] RunDB.record_start() already catches
+        # OSError/sqlite3.Error internally and never raises — this try/except
+        # is a second layer against any other unexpected exception type,
+        # because recording run state must NEVER break a real jail run.
+        try:
+            from runtime.rundb import RunDB  # noqa: PLC0415
+            RunDB().record_start(
+                jail_name,
+                image=image_ref,
+                image_digest=str(snapshot_id),
+                dataset=handle.dataset,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("rundb: failed to record run start for %s (non-fatal): %s", jail_name, exc)
 
         # rctl resource limits — best-effort, never fatal to the run.
         await _apply_rctl(jail_name, rctl_rules)
@@ -1079,6 +1123,7 @@ async def _run_async(
             timeout=jexec_timeout,
         )
         log.info("jexec finished with exit code %d", exit_code)
+        run_completed = True  # a real exit_code was produced — see record_exit below
         # END_JEXEC_RUN
 
     finally:
@@ -1125,6 +1170,29 @@ async def _run_async(
                 await _clear_rctl(jail_name)
             except Exception as exc:  # noqa: BLE001
                 log.warning("failed to clear rctl rules for %s (non-fatal): %s", jail_name, exc)
+
+            # Record the run's terminal status for `jailrun ps` (runtime/rundb.py).
+            # Gated on jail_created: only record an exit if a record_start was
+            # ever attempted for this jail_name. run_completed=True means
+            # _stream_jexec returned normally with a real exit_code ("exited");
+            # False covers every other way the jail got here — the jexec
+            # timeout path (which already killed the process and removed the
+            # jail itself, see _stream_jexec) and any other exception raised
+            # after jail creation — for which "killed" is the closest fit
+            # RunDB's CHECK-constrained status column offers, and exit_code is
+            # None since no real exit code was ever produced.
+            # [DEFENSE IN DEPTH] same rationale as record_start above — never
+            # let a broken rundb affect the run's own exit code / control flow.
+            if jail_created:
+                try:
+                    from runtime.rundb import RunDB  # noqa: PLC0415
+                    RunDB().record_exit(
+                        jail_name,
+                        status="exited" if run_completed else "killed",
+                        exit_code=exit_code if run_completed else None,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("rundb: failed to record run exit for %s (non-fatal): %s", jail_name, exc)
 
         if rm:
             try:
