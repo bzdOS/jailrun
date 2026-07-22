@@ -6,7 +6,7 @@
 # DEPENDENCIES: stdlib (argparse, sys, sqlite3, json); runtime.engine.run;
 #               runtime.engine._store_module/_load_manifest (explain IMAGE path);
 #               runtime.explain.render_explain; runtime.lifecycle.Lifecycled;
-#               runtime.rundb.RunDB (ps); no external tools invoked here
+#               runtime.rundb.RunDB (ps); runtime.doctor (doctor); runtime.gc (gc)
 # PUBLIC_API: main(argv) -> int
 # END_AI_HEADER
 
@@ -17,6 +17,8 @@ Entry point: `jailrun` dispatches to subcommands:
   jailrun run [FLAGS] IMAGE [CMD [ARGS...]]
   jailrun ps [--all]
   jailrun explain [--manifest FILE | IMAGE] [--format text|json]
+  jailrun doctor [--format text|json]
+  jailrun gc [--fix] [--format text|json]
   jailrun version
 
 Design notes:
@@ -306,6 +308,39 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Output format: 'text' (default, human-readable) or 'json'.",
     )
 
+    # ---- gc -----------------------------------------------------------------
+    gc_p = sub.add_parser(
+        "gc",
+        help="Find and clean up orphans left behind by a jailrun crash",
+        description=(
+            "Reconcile `jls -n`, the run-state db (runtime/rundb.py), and the\n"
+            "store's runs dataset/directory tree to find crash artifacts left\n"
+            "behind when jailrun's OWN process is killed mid-run (not the jailed\n"
+            "workload crashing — engine.py's finally/timeout logic already\n"
+            "handles that case): stale 'running' rundb rows whose jail is gone,\n"
+            "live jailrun-* jails with no (or stale) rundb row, and orphaned\n"
+            "ZFS clones/plaindir copies.\n"
+            "\n"
+            "Default: dry-run report only (exit 0 if clean, 1 if anything is\n"
+            "found — usable as a health check in scripts). --fix: actually\n"
+            "clean up what was found."
+        ),
+    )
+    gc_p.add_argument(
+        "--fix",
+        dest="fix",
+        action="store_true",
+        default=False,
+        help="Actually clean up detected orphans (default: dry-run report only).",
+    )
+    gc_p.add_argument(
+        "--format",
+        dest="format",
+        choices=("text", "json"),
+        default="text",
+        help="Output format: 'text' (default, human-readable) or 'json'.",
+    )
+
     # ---- jail lifecycle (delegated to bsdos_lifecycled) ---------------------
     for verb, helptext in (
         ("freeze", "SIGSTOP a jail's processes (0%% CPU, state stays in RAM)"),
@@ -518,6 +553,28 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     return exit_code_for_results(results)
 
 
+# _cmd_gc:start
+#   purpose: run the gc reconciliation cycle and print the report
+#   input:
+#     args: argparse.Namespace — parsed flags from the 'gc' subparser
+#           (fix: bool, format: 'text'|'json')
+#   output:
+#     exit_code: int — see runtime.gc.exit_code_for() (0 = clean/all-fixed,
+#                1 = orphans found / a fix failed)
+#   sideEffects: calls runtime.gc.run_gc() (jls/rundb/zfs I/O, and --fix's
+#                cleanup actions when args.fix is set) and runtime.gc.render();
+#                prints the formatted report to stdout via print()
+# _cmd_gc:end
+def _cmd_gc(args: argparse.Namespace) -> int:
+    """Run the gc reconciliation cycle; print the report; return exit code."""
+    from runtime.gc import run_gc, render, exit_code_for  # noqa: PLC0415
+
+    orphans, fixes, notes = run_gc(fix=args.fix)
+    output = render(orphans, fixes, notes, fmt=args.format)
+    print(output)
+    return exit_code_for(orphans, fixes)
+
+
 # _cmd_lifecycle:start
 #   purpose: dispatch freeze/thaw/hibernate/restore verb to Lifecycled daemon and print the result
 #   input:
@@ -566,6 +623,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_version(args)
     if args.subcommand == "doctor":
         return _cmd_doctor(args)
+    if args.subcommand == "gc":
+        return _cmd_gc(args)
     if args.subcommand in ("freeze", "thaw", "hibernate", "restore"):
         return _cmd_lifecycle(args.subcommand, args)
 
