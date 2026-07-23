@@ -4,7 +4,8 @@
 # INTENT: front-door for the jailrun binary; keeps parsing logic isolated so engine.py
 #         and lifecycle.py have no argparse dependency and can be imported in tests
 # DEPENDENCIES: stdlib (argparse, sys, sqlite3, json); runtime.engine.run;
-#               runtime.engine._store_module/_load_manifest (explain IMAGE path, pull);
+#               runtime.engine.exec_run/_check_jail_live (exec); runtime.engine.
+#               _store_module/_load_manifest (explain IMAGE path, pull);
 #               runtime.explain.render_explain; runtime.lifecycle.Lifecycled;
 #               runtime.rundb.RunDB (ps, logs); runtime.doctor (doctor); runtime.gc (gc);
 #               runtime.scan.scan_image/aggregate/render (scan)
@@ -16,6 +17,7 @@ jailrun CLI — docker-run-compatible argument parser for the jailrun runtime.
 
 Entry point: `jailrun` dispatches to subcommands:
   jailrun run [FLAGS] IMAGE [CMD [ARGS...]]
+  jailrun exec [FLAGS] JAIL_NAME CMD [ARGS...]
   jailrun pull IMAGE [--authfile PATH] [--creds USER:PASS]
   jailrun ps [--all]
   jailrun logs JAIL_NAME
@@ -27,7 +29,10 @@ Entry point: `jailrun` dispatches to subcommands:
 
 Design notes:
 - Mirror docker run flag surface so existing tooling / docs translate 1-to-1.
-- Keep this file pure-parsing: no I/O, no subprocess. engine.run() does work.
+- Keep this file pure-parsing: no I/O, no subprocess. engine.run()/exec_run()
+  do the actual work — the jls(8)/rundb liveness check `exec` needs before
+  dispatch also lives in engine.py (_check_jail_live), not here, for the same
+  reason.
 - py_compile-clean; mocks for unbuilt seams (store, probe, bakery) live in engine.py.
 """
 
@@ -256,6 +261,65 @@ def _build_parser() -> argparse.ArgumentParser:
         help="OCI image reference, e.g. alpine:3.19 or esphome/esphome:2025.5",
     )
     run_p.add_argument(
+        "cmd",
+        metavar="CMD",
+        nargs=argparse.REMAINDER,
+        help="Command (and arguments) to run inside the jail.",
+    )
+
+    # ---- exec -----------------------------------------------------------
+    exec_p = sub.add_parser(
+        "exec",
+        help="Run an additional command inside an already-running jail",
+        description=(
+            "Run CMD inside a jail that a PRIOR `jailrun run` already created\n"
+            "and left running — the same shape as `docker exec`. Verifies\n"
+            "JAIL_NAME is live (jls -n name is authoritative; the run-state\n"
+            "db is consulted only as best-effort corroboration) before\n"
+            "running anything.\n"
+            "\n"
+            "Non-interactive only: no -it/pseudo-TTY allocation (a separate,\n"
+            "larger task) — streamed stdout/stderr, the same shape `jailrun\n"
+            "run` itself already provides. SIGINT/SIGTERM sent to this CLI\n"
+            "process are forwarded to the exec'd command specifically (not\n"
+            "the whole jail, which may have other work running in it)."
+        ),
+    )
+    exec_p.add_argument(
+        "jail",
+        metavar="JAIL_NAME",
+        help="Name of an already-running jail (e.g. jailrun-<handle>), as shown by `jailrun ps`.",
+    )
+    exec_p.add_argument(
+        "-e", "--env",
+        dest="env",
+        metavar="KEY=VALUE",
+        action="append",
+        type=_kv_pair,
+        default=[],
+        help="Set environment variable for this exec'd command. Repeatable.",
+    )
+    exec_p.add_argument(
+        "-w", "--workdir",
+        dest="workdir",
+        metavar="DIR",
+        default=None,
+        help="Working directory inside the jail for this exec'd command.",
+    )
+    exec_p.add_argument(
+        "--timeout",
+        dest="timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "Kill this exec'd command after this many seconds (default: "
+            "engine.DEFAULT_JEXEC_TIMEOUT_S, 1800s)."
+        ),
+    )
+    # JAIL_NAME is positional; everything after it is the command (mirrors
+    # `run`'s IMAGE + cmd REMAINDER pattern above).
+    exec_p.add_argument(
         "cmd",
         metavar="CMD",
         nargs=argparse.REMAINDER,
@@ -521,6 +585,51 @@ def _cmd_run(args: argparse.Namespace) -> int:
         # (no limit at all) instead of falling back to the documented default.
         opts["timeout"] = args.timeout
     return run(image_ref=args.image, cmd=args.cmd, opts=opts)
+
+
+# _cmd_exec:start
+#   purpose: run an ADDITIONAL command inside an ALREADY-RUNNING jail
+#            (docker-exec semantics) — verify the target is live before
+#            touching anything, then delegate to engine.exec_run()
+#   input:
+#     args: argparse.Namespace — parsed flags from the 'exec' subparser
+#           (jail: str, cmd: list[str], env: list[(k,v)], workdir: str|None,
+#           timeout: float|None)
+#   output:
+#     exit_code: int — the real exit code from the jexec'd process on
+#                success; 1 if jail_name is not live (clean one-line message,
+#                never a raw traceback — see runtime.engine._check_jail_live)
+#                or if engine.exec_run() itself raises
+#   sideEffects: imports runtime.engine lazily (matching the other _cmd_*
+#                handlers) and calls its _check_jail_live() (subprocess:
+#                `jls -n name`; best-effort RunDB read — see that function's
+#                own contract for the exact jls-vs-rundb precedence); on a
+#                live jail, calls engine.exec_run(), which runs
+#                `jexec <jail_name> ...` and streams its stdout/stderr —
+#                does NOT create or destroy the jail. Prints a clean one-line
+#                error to stderr (never a raw traceback) on any failure.
+# _cmd_exec:end
+def _cmd_exec(args: argparse.Namespace) -> int:
+    """Run CMD inside an already-running jail (docker-exec semantics); return exit code."""
+    from runtime.engine import _check_jail_live, exec_run  # noqa: PLC0415  (import inside fn for testability)
+
+    live, message = _check_jail_live(args.jail)
+    if not live:
+        print(message, file=sys.stderr)
+        return 1
+
+    opts: dict = {
+        "env": dict(args.env),
+        "workdir": args.workdir,
+    }
+    if args.timeout is not None:
+        opts["timeout"] = args.timeout
+
+    try:
+        return exec_run(args.jail, args.cmd, opts)
+    except Exception as exc:  # noqa: BLE001 — CLI reports a clean message, never a raw traceback
+        print(f"jailrun exec: failed: {exc}", file=sys.stderr)
+        return 1
 
 
 # _cmd_pull:start
@@ -888,6 +997,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.subcommand == "run":
         return _cmd_run(args)
+    if args.subcommand == "exec":
+        return _cmd_exec(args)
     if args.subcommand == "pull":
         return _cmd_pull(args)
     if args.subcommand == "ps":

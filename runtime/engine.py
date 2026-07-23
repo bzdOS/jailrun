@@ -6,16 +6,21 @@
 #         FreeBSD jail via jail(8), run the user command with jexec(8), stream I/O
 #         (teeing it to a persisted per-run log file for `jailrun logs`),
 #         and tear down the jail and optionally destroy the clone on exit.
-# DEPENDENCIES: stdlib (asyncio, json, logging, os, shlex, tempfile, textwrap, pathlib);
+# DEPENDENCIES: stdlib (asyncio, contextlib, json, logging, os, re, shlex,
+#               signal, subprocess, tempfile, textwrap, pathlib);
 #               store (S3 seam — resolve/unpack/clone/mount/destroy ZFS datasets);
 #               probe (S2 seam — produces substitution manifest for a rootfs);
 #               bakery (S4 seam — fills native.artifact_path in the manifest);
 #               runtime._mocks (fallback stubs when real seams are absent);
 #               runtime.lifecycle (bsdos_lifecycled teardown, imported lazily);
 #               runtime.rundb (RunDB run-state ledger, imported lazily — see the
-#               record_start/record_exit call sites in _run_async);
-#               FreeBSD system tools: jail(8), jexec(8), kldload(8), nullfs(5)
-# PUBLIC_API: run(image_ref, cmd, opts) -> int
+#               record_start/record_exit call sites in _run_async, and the
+#               best-effort liveness check in _check_jail_live for exec_run);
+#               FreeBSD system tools: jail(8), jexec(8), jls(8), kldload(8), nullfs(5)
+# PUBLIC_API: run(image_ref, cmd, opts) -> int;
+#             exec_run(jail_name, cmd, opts) -> int (`jailrun exec` — runs one
+#             more command against an ALREADY-RUNNING jail; does not create or
+#             destroy anything, unlike run()/_run_async())
 # END_AI_HEADER
 
 # START_INVARIANTS
@@ -80,14 +85,18 @@ py_compile-clean: the mock imports below resolve at import time even on Linux.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
+import re
 import shlex
+import signal
+import subprocess
 import tempfile
 import textwrap
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 log = logging.getLogger("jailrun.engine")
 
@@ -741,6 +750,14 @@ def _open_log_file(log_path: str):
 #               the jailed process's stdout/stderr is ALSO written here (tee),
 #               on top of the existing live streaming; this function does NOT
 #               open or close it (see _run_async, which owns that lifecycle)
+#     on_process_started: an optional callable invoked with the live
+#               asyncio.subprocess.Process right after it is spawned (before
+#               any streaming/wait begins), or None (default) — added for
+#               exec_run()/_exec_async() (`jailrun exec`) to capture the PID so
+#               a signal received by jailrun's OWN CLI process can be forwarded
+#               to this specific jexec'd process (see _install_signal_forwarding).
+#               _run_async's own call site never passes this (defaults to None,
+#               so `jailrun run`'s behavior is completely unchanged).
 #   output:
 #     exit_code: int — exact returncode of the process that ran inside the jail
 #   sideEffects: spawns subprocess `jexec <jail_name> [sh -c 'cd <workdir> && ]
@@ -750,7 +767,8 @@ def _open_log_file(log_path: str):
 #                the jexec'd process); if log_file is given, writes the same
 #                bytes to it too — a write failure there is caught, logged as a
 #                warning, and DISABLES further log writes for the rest of this
-#                call (live streaming to stdout/stderr is never affected)
+#                call (live streaming to stdout/stderr is never affected); calls
+#                on_process_started(proc) once, right after spawn, iff given
 #   rationale: jexec is used instead of jail exec.start because exec.start returns
 #              rc=0 on successful dispatch regardless of the inner command's exit code
 async def _stream_jexec(
@@ -762,6 +780,7 @@ async def _stream_jexec(
     workdir: str | None,
     timeout: float | None = DEFAULT_JEXEC_TIMEOUT_S,
     log_file: Any = None,
+    on_process_started: Callable[[Any], None] | None = None,
 ) -> int:
     """
     Execute `cmd` inside `jail_name` via jexec; stream stdout+stderr to our
@@ -816,6 +835,15 @@ async def _stream_jexec(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
+
+    # [EXEC SIGNAL FORWARDING] Hand the live Process to the caller (only
+    # exec_run()/_exec_async() passes this) BEFORE any streaming/wait begins,
+    # so a SIGINT/SIGTERM received by jailrun's own CLI process can be
+    # forwarded straight to THIS specific jexec'd process — see
+    # _install_signal_forwarding. _run_async never passes on_process_started,
+    # so `jailrun run` is byte-for-byte unaffected by this hook's existence.
+    if on_process_started is not None:
+        on_process_started(proc)
 
     async def _pipe_lines(stream: asyncio.StreamReader, sink: Any) -> None:
         # _pipe_lines: drains stream in raw chunks into sink.buffer, best-effort tee to log_file (pure IO pump, no return value)
@@ -1395,3 +1423,274 @@ async def _run_async(
 
     return exit_code
 # _run_async:end
+
+
+# ===========================================================================
+# `jailrun exec` — run one more command against an ALREADY-RUNNING jail
+# ===========================================================================
+#
+# Unlike run()/_run_async() (which create a brand-new jail from an image and
+# tear it down again), exec targets a jail a PRIOR `jailrun run` already
+# created and left running — the same shape as `docker exec`. It must NOT
+# create or destroy anything: not the jail, not a ZFS clone, nothing. The
+# jexec-invocation-and-streaming logic is exactly what _stream_jexec already
+# does, so exec reuses it directly (see _exec_async below) rather than
+# reimplementing it or routing through _run_async, whose whole job (resolve /
+# unpack / clone / shadow / jail -c / ... / jail -r / destroy) is wrong for
+# this case. The one adjustment made to _stream_jexec itself is the narrow,
+# backward-compatible on_process_started hook added above — needed so exec
+# can forward signals to the SPECIFIC jexec'd process (see
+# _install_signal_forwarding), not to the whole jail (that would be wrong here:
+# the jail may have OTHER things running in it, e.g. the original `jailrun
+# run` command exec is reaching into).
+
+# _list_live_jail_names:start
+#   purpose: enumerate jail names currently visible on this host via jls(8) —
+#            mirrors runtime/gc.py's _list_jail_names() exact subprocess
+#            pattern (argv shape, timeout, `name=` regex parse). Duplicated
+#            here rather than imported because this task's scope explicitly
+#            excludes touching gc.py; keep the two in sync if jls's output
+#            format is ever revisited.
+#   input: none
+#   output:
+#     names: list[str] | None — jail names (possibly an empty list if
+#            genuinely zero jails are running), or None if jls itself is
+#            unavailable or failed (non-FreeBSD host, jail subsystem absent,
+#            etc.) — NOT the same as "zero jails"
+#   sideEffects: runs 'jls -n name' with a bounded timeout; never raises
+def _list_live_jail_names() -> list[str] | None:
+    """Return jail names from `jls -n name`, or None if jls is unavailable. Mirrors runtime/gc.py."""
+    try:
+        proc = subprocess.run(
+            ["jls", "-n", "name"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        log.debug("exec: jls unavailable: %s", exc)
+        return None
+    if proc.returncode != 0:
+        log.debug("exec: jls exited %d: %s", proc.returncode, proc.stderr.strip())
+        return None
+    names: list[str] = []
+    for line in proc.stdout.splitlines():
+        m = re.search(r"\bname=(\S+)", line)
+        if m:
+            names.append(m.group(1))
+    return names
+# _list_live_jail_names:end
+
+
+# _check_jail_live:start
+#   purpose: verify jail_name is actually a live, running jail before
+#            `jailrun exec` runs anything against it
+#   input:
+#     jail_name: str — target jail name (as shown by `jailrun ps`)
+#   output:
+#     tuple[bool, str] — (live, message); message is "" when live is True, a
+#     clean one-line human-readable explanation when live is False (callers
+#     print this directly — never a raw traceback)
+#   sideEffects: calls _list_live_jail_names() (subprocess: jls -n name);
+#                best-effort imports runtime.rundb.RunDB and calls
+#                .list_runs(status="running") — ANY failure there (missing
+#                db, OSError, sqlite3.Error, or any other exception type) is
+#                caught, logged as a warning, and does NOT change the result
+#   rationale: jls is ground truth for "is a jail alive on this host right
+#              now". rundb is jailrun's OWN bookkeeping ledger and can be
+#              stale — a crash before record_start ever ran, a 'running' row
+#              left behind after an out-of-band `jail -r`, etc. (see
+#              runtime/gc.py's entire reconciliation module for exactly this
+#              class of drift). So precedence is: jls says the jail is NOT
+#              live -> not live, full stop, even if rundb still says
+#              'running'. jls says it IS live -> live; rundb is consulted
+#              ONLY as best-effort corroboration (logs a warning on a
+#              mismatch, or if the db is unreachable) and never overrides
+#              jls in either direction — never hard-fail exec just because
+#              the rundb ledger is unreachable when jls already confirmed
+#              the jail is really there.
+def _check_jail_live(jail_name: str) -> tuple[bool, str]:
+    """Authoritative-jls + best-effort-rundb liveness check for `jailrun exec`."""
+    known_jails = _list_live_jail_names()
+    if known_jails is None:
+        return False, (
+            "jailrun exec: could not enumerate live jails via `jls -n name` "
+            "on this host (not FreeBSD, or jls unavailable)"
+        )
+    if jail_name not in known_jails:
+        return False, f"jailrun exec: no live jail named {jail_name!r} (jls -n name)"
+
+    # jls says the jail IS live — authoritative, we proceed regardless of
+    # what follows. rundb is consulted only for a best-effort warning.
+    try:
+        from runtime.rundb import RunDB  # noqa: PLC0415  (lazy import, same pattern as elsewhere in this module)
+        rows = RunDB().list_runs(status="running")
+        running_names = {row.get("jail_name") for row in rows}
+        if jail_name not in running_names:
+            log.warning(
+                "jailrun exec: jail %r is live per `jls` but has no 'running' "
+                "rundb row (stale/missing bookkeeping) — proceeding on jls alone",
+                jail_name,
+            )
+    except Exception as exc:  # noqa: BLE001 — rundb reachability must never block exec against a jls-confirmed-live jail
+        log.warning(
+            "jailrun exec: rundb unreachable (%s) — proceeding on jls alone", exc,
+        )
+
+    return True, ""
+# _check_jail_live:end
+
+
+# _install_signal_forwarding:start
+#   purpose: install SIGINT/SIGTERM handlers for the duration of `jailrun
+#            exec` so a signal delivered to jailrun's OWN CLI process is
+#            forwarded to the jexec'd subprocess's PID specifically — NOT to
+#            the whole jail (unlike _stream_jexec's OWN timeout path, which
+#            deliberately removes the whole jail — a different tradeoff
+#            justified by that timeout's own contract; exec must not destroy
+#            anything, the jail may have other work running in it, e.g. the
+#            original `jailrun run` command)
+#   input:
+#     proc_holder: dict[str, Any] — mutable box that _exec_async's
+#                  on_process_started callback populates with the live
+#                  asyncio.subprocess.Process once _stream_jexec spawns it; if
+#                  a signal arrives before the process exists yet, or after it
+#                  has already exited (returncode is not None), forwarding is
+#                  a no-op — nothing live to signal
+#   output: a context manager (contextlib.contextmanager); installs handlers
+#           on entry, restores whatever signal.getsignal() reported BEFORE
+#           entry (which may itself be a caller's own prior customization, not
+#           necessarily SIG_DFL) on exit — never leaks a global handler
+#           override into the rest of the CLI process's lifetime
+#   sideEffects: signal.signal(SIGINT, ...) / signal.signal(SIGTERM, ...) —
+#                process-wide global state for the duration of the `with`
+#                block; proc.send_signal() (== os.kill(pid, sig) under the
+#                hood) when a forwarded signal actually fires
+@contextlib.contextmanager
+def _install_signal_forwarding(proc_holder: dict[str, Any]):
+    """Forward SIGINT/SIGTERM to proc_holder['proc'] for the duration of the block."""
+
+    def _make_handler(sig: int) -> Callable[[int, Any], None]:
+        def _handler(_signum: int, _frame: Any) -> None:
+            proc = proc_holder.get("proc")
+            if proc is not None and proc.returncode is None:
+                try:
+                    proc.send_signal(sig)
+                except ProcessLookupError:
+                    # Already exited between the returncode check and the
+                    # kill — nothing left to signal, not an error.
+                    pass
+        return _handler
+
+    orig_sigint = signal.getsignal(signal.SIGINT)
+    orig_sigterm = signal.getsignal(signal.SIGTERM)
+    signal.signal(signal.SIGINT, _make_handler(signal.SIGINT))
+    signal.signal(signal.SIGTERM, _make_handler(signal.SIGTERM))
+    try:
+        yield
+    finally:
+        # Restore whatever was there before us, not necessarily SIG_DFL —
+        # never leak a global handler override into the rest of the process.
+        signal.signal(signal.SIGINT, orig_sigint)
+        signal.signal(signal.SIGTERM, orig_sigterm)
+# _install_signal_forwarding:end
+
+
+# _exec_async:start
+#   purpose: run cmd inside an ALREADY-RUNNING jail via _stream_jexec — the
+#            async body behind exec_run(); creates and destroys nothing
+#   input:
+#     jail_name: str — name of an already-running jail (caller must have
+#                already verified liveness — see _check_jail_live)
+#     cmd: list[str] — command to run inside the jail (empty -> /bin/sh)
+#     opts: dict[str, Any] — env (dict), workdir (str|None), timeout
+#           (float|None, default DEFAULT_JEXEC_TIMEOUT_S)
+#     proc_holder: dict[str, Any] — passed straight through to
+#                  _stream_jexec's on_process_started hook so
+#                  _install_signal_forwarding (installed by the caller,
+#                  exec_run()) can find the live process to forward to
+#   output:
+#     exit_code: int — exact exit code from the jexec'd process
+#   sideEffects: calls _stream_jexec(jail_name, cmd, conf_path=None, ...) —
+#                conf_path=None because exec never wrote a jail.conf for this
+#                jail (it did not create it, so it has no conf file to pass);
+#                log_file=None (exec output is not persisted to `jailrun
+#                logs` — that ledger belongs to the run that created the jail)
+#   [KNOWN GAP — out of this task's scope] _stream_jexec's OWN `timeout`
+#   parameter is reused as-is here (this task only adds SIGINT/SIGTERM
+#   forwarding, per its explicit scope). If THIS opts["timeout"] (or the
+#   DEFAULT_JEXEC_TIMEOUT_S default, 1800s) expires, _stream_jexec's existing
+#   timeout path still runs `jail -r <jail_name>` and REMOVES THE WHOLE JAIL —
+#   the same tradeoff _run_async's own timeout makes for `jailrun run`, which
+#   is fine THERE because that jail belongs solely to that run. For `jailrun
+#   exec`, this is arguably too broad (the jail may have other work in it,
+#   e.g. the original `jailrun run` command) but is the SAME timeout
+#   mechanism _stream_jexec always had, deliberately not changed by this
+#   task — SIGINT/SIGTERM forwarding (the actual ask here) never triggers
+#   this path at all, only an expired --timeout does. Flagged here rather
+#   than silently accepted; a real fix would need _stream_jexec's timeout
+#   path to distinguish "I created this jail" from "I did not" (e.g. via a
+#   kill-whole-jail-on-timeout: bool param) — a separate, bigger change.
+async def _exec_async(
+    jail_name: str,
+    cmd: list[str],
+    opts: dict[str, Any],
+    proc_holder: dict[str, Any],
+) -> int:
+    """Run cmd inside an existing jail via _stream_jexec. Creates/destroys nothing."""
+    env: dict[str, str] = opts.get("env", {})
+    workdir: str | None = opts.get("workdir")
+    timeout: float | None = opts.get("timeout", DEFAULT_JEXEC_TIMEOUT_S)
+
+    if not cmd:
+        cmd = ["/bin/sh"]
+
+    def _capture_proc(proc: Any) -> None:
+        proc_holder["proc"] = proc
+
+    return await _stream_jexec(
+        jail_name,
+        cmd,
+        conf_path=None,
+        env=env,
+        workdir=workdir,
+        timeout=timeout,
+        log_file=None,
+        on_process_started=_capture_proc,
+    )
+# _exec_async:end
+
+
+# exec_run:start
+#   purpose: synchronous public entry point for `jailrun exec` — bridges the
+#            asyncio boundary for cli.py, exactly like run() does for
+#            `jailrun run`, and installs/restores SIGINT/SIGTERM forwarding
+#            around the whole call
+#   input:
+#     jail_name: str — name of an ALREADY-RUNNING jail (caller, cli.py's
+#                _cmd_exec, must have already verified liveness via
+#                _check_jail_live before calling this)
+#     cmd: list[str] — command to run inside the jail (empty -> /bin/sh)
+#     opts: dict[str, Any] — env (dict), workdir (str|None), timeout (float|None)
+#   output:
+#     exit_code: int — exact exit code returned by the command inside the jail
+#   sideEffects: installs SIGINT/SIGTERM handlers for the duration of the call
+#                (see _install_signal_forwarding — always restored, even on
+#                exception, before this function returns) and drives
+#                _exec_async(), which runs _stream_jexec() against jail_name;
+#                does NOT create or destroy the jail or any ZFS clone — see
+#                the module-level rationale above this section
+def exec_run(jail_name: str, cmd: list[str], opts: dict[str, Any]) -> int:
+    """
+    Synchronous entry point called from cli.py's _cmd_exec.
+
+    Runs `cmd` inside the ALREADY-RUNNING jail `jail_name` (docker-exec
+    semantics — see the module-level rationale above this section). Unlike
+    run(), this never creates or tears down a jail/clone: it only reuses
+    _stream_jexec's jexec-invocation-and-streaming logic against an existing
+    jail_name. SIGINT/SIGTERM received by this process while the command is
+    running are forwarded to the jexec'd process specifically (not the whole
+    jail — see _install_signal_forwarding).
+    """
+    proc_holder: dict[str, Any] = {}
+    with _install_signal_forwarding(proc_holder):
+        return asyncio.run(_exec_async(jail_name, cmd, opts, proc_holder))
+# exec_run:end
