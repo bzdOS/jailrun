@@ -4,6 +4,30 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed (2026-07-23)
+- **`_merge_tree` special-file handling — contract fix (non-security).** A non-regular,
+  non-symlink, non-directory OCI-layer entry (a FIFO, an AF_UNIX socket, or — as root — a
+  char/block device node) reached the `shutil.copy2()` call in the final else branch of
+  `store/store.py`'s `_merge_tree()`. `shutil.copy2()` → `copyfile()` detects a FIFO via
+  `stat.S_ISFIFO` and raises `shutil.SpecialFileError`; a socket raises a plain `OSError`
+  even earlier inside `open()`. Both are `OSError` subclasses, NEITHER a `store.StoreError`,
+  so a caller catching only `StoreError` (as the rest of `store.py`'s contract implies) would
+  not have caught this crash. The safety property always held — nothing was written into the
+  rootfs, no partial state, no hang (the FIFO guard fires before the destination is ever
+  opened, verified against deliberately-constructed input) — so this is purely an
+  exception-type contract fix, not a vulnerability. `_merge_tree` now detects a non-regular
+  file explicitly (`if not item.is_file()`) and raises `StoreError` naming the offending
+  entry and its `stat.filemode()` type BEFORE `copy2` is ever called. The fail-closed
+  behavior is unchanged (a special-file entry is still refused, never materialized); only
+  the exception type now matches the module's stated contract. Pinned down by
+  `store/test_special_file_handling.py` (FIFO via `os.mkfifo` + AF_UNIX socket via
+  `socket.bind` — the two special-file types representable without root). This closes the
+  "wrong exception type" nit that `test_layer_adversarial.py` /
+  `test_layer_adversarial_extended.py` had documented but deliberately left unfixed while
+  `store.py` was off-limits to those test-only tracks.
+
 ## [0.1.0] - 2026-07-20
 
 ### rctl limits individually stress-tested (2026-07-20)

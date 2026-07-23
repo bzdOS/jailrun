@@ -118,6 +118,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import tempfile
 import time
@@ -2004,7 +2005,12 @@ def _within(path: Path, root: Path) -> bool:
 #   sideEffects: for each non-whiteout item in src: creates target directory via Path.mkdir;
 #                recreates symlinks via os.symlink (removes existing target first with Path.unlink);
 #                copies regular files via shutil.copy2 (preserves timestamps).
-#                Raises StoreError (fail-closed) if an entry's resolved parent escapes dst.
+#                Raises StoreError (fail-closed) if an entry's resolved parent escapes dst,
+#                OR if an entry is a special file (FIFO / AF_UNIX socket / device node) rather
+#                than a regular file, directory, or symlink — shutil.copy2() would otherwise
+#                raise shutil.SpecialFileError (a bare OSError subclass) on a FIFO or a plain
+#                OSError on a socket, neither of which is StoreError, so a caller catching only
+#                StoreError (as the rest of store.py's contract implies) would miss it.
 def _merge_tree(src: Path, dst: Path) -> None:
     """
     Recursively copy *src* into *dst*, skipping whiteout marker files.
@@ -2045,6 +2051,24 @@ def _merge_tree(src: Path, dst: Path) -> None:
             # Never write through an inherited symlink; replace it with the real file.
             if target.is_symlink():
                 target.unlink()
+            # Special files (FIFO / AF_UNIX socket / device node) are NOT regular
+            # files: shutil.copy2() -> copyfile() detects a FIFO via stat.S_ISFIFO
+            # and raises shutil.SpecialFileError (a bare OSError subclass); a socket
+            # raises a plain OSError even earlier inside open(). Neither is StoreError,
+            # so a caller catching only StoreError (the rest of store.py's contract)
+            # would not catch this crash. Fail closed with the documented exception
+            # type instead. NOT a security issue: the _within() containment check
+            # above already held, and nothing is written either way (the destination
+            # is never opened) — this only fixes the exception type to match the
+            # module's stated contract. Verified non-hanging: copyfile()'s FIFO guard
+            # fires before the destination is ever opened (see
+            # test_special_file_handling.py).
+            if not item.is_file():
+                raise StoreError(
+                    f"OCI layer entry {str(rel)!r} is not a regular file "
+                    f"(mode {stat.filemode(item.stat().st_mode)!r}); "
+                    "refusing to unpack special-file entry"
+                )
             shutil.copy2(str(item), str(target))
 # _merge_tree:end
 

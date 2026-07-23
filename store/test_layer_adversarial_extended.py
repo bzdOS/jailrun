@@ -30,10 +30,15 @@
 #          have failed on such an entry before _merge_tree ever saw it — see the "NOT TESTED" note
 #          in the module docstring below for the empirical basis.
 # REPORT_ON_FINDINGS: no new escape and no non-fail-closed crash found. TWO more instances of the
-#          SAME non-security nit class test_layer_adversarial.py already documented for the FIFO/
-#          socket case (an uncaught-by-callers-of-StoreError exception type, with the safety
-#          property — nothing written or deleted outside the intended scope, no partial state,
-#          no hang — fully intact) were found on two DIFFERENT code paths:
+#          non-security "wrong exception type" nit class (an uncaught-by-callers-of-StoreError
+#          exception type, with the safety property — nothing written or deleted outside the
+#          intended scope, no partial state, no hang — fully intact) were found on two DIFFERENT
+#          code paths here. NOTE: the ORIGINAL instance of this nit class — the FIFO/socket entry
+#          in _merge_tree that test_layer_adversarial.py first documented — has SINCE BEEN FIXED
+#          (_merge_tree now raises StoreError on any non-regular-file entry before copy2; see
+#          store/test_special_file_handling.py). The two instances below are on the
+#          _clear_opaque_whiteout code path, NOT _merge_tree, and so remain open here (a separate
+#          fix, not part of that change):
 #            1. _clear_opaque_whiteout on a container_dir that does not exist at all raises
 #               FileNotFoundError (iterdir() on a missing path), not StoreError, before deleting
 #               anything. In production this exact path is unreachable — _unpack_bsdtar's real
@@ -47,7 +52,7 @@
 #               Path.exists() returns True for a plain file too, so _unpack_bsdtar's own guard does
 #               NOT filter it out. Still fails cleanly before any deletion — no escape, no partial
 #               state — so it is documented here as a passing test (matching how
-#               test_layer_adversarial.py treats the FIFO/socket case), not an xfail: the one
+#               test_layer_adversarial.py treated the now-fixed FIFO/socket case), not an xfail: the one
 #               thing that would make it an xfail-worthy finding — an actual escape, or a crash
 #               that leaves inconsistent/partially-mutated state — does not happen here.
 # DEPENDENCIES: stdlib (os, sys, tempfile, pathlib), store.store (_merge_tree, _within, StoreError,
@@ -263,17 +268,18 @@ def test_opaque_whiteout_on_nonexistent_container_dir_documents_exception_type()
     """Opaque-whiteout counterpart to the no-op test above: an opaque-whiteout marker
     (.wh..wh..opq) for a directory that was never created in the destination at all.
 
-    FINDING (non-security, same class as test_layer_adversarial.py's documented FIFO/socket nit
-    — see this module's REPORT_ON_FINDINGS header — NOT fixed here, store.py is off-limits):
+    FINDING (non-security, same nit CLASS as test_layer_adversarial.py's FIFO/socket case
+    — see this module's REPORT_ON_FINDINGS header — STILL OPEN here, unlike the FIFO/socket
+    case which has since been fixed in _merge_tree; see store/test_special_file_handling.py):
     unlike the file-whiteout path (a true no-op, see the previous test), _clear_opaque_whiteout
     calls container_dir.iterdir() unconditionally once the containment check passes, and
     Path.iterdir() on a path that does not exist at all raises FileNotFoundError, not StoreError.
     In production this exact path is unreachable — _unpack_bsdtar's own call site only invokes
     _clear_opaque_whiteout after checking `container_dir.exists()` — but the pure function itself
     makes no such promise, so the same "caller catching only StoreError won't catch this" caveat
-    the FIFO test already documents applies here too. The security property that matters — no
-    deletion happens, nothing outside dst is touched — holds regardless, which is why this is a
-    passing test (broad except) rather than an xfail."""
+    applies here. The security property that matters — no deletion happens, nothing outside dst
+    is touched — holds regardless, which is why this is a passing test (broad except) rather
+    than an xfail."""
     with tempfile.TemporaryDirectory() as td:
         base = Path(td)
         dst = base / "rootfs"
@@ -296,15 +302,17 @@ def test_opaque_whiteout_on_plain_file_container_dir_documents_exception_type():
     directories, so a crafted or corrupt layer claiming one over a file is squarely the kind of
     fuzz/corpus input this milestone calls for).
 
-    FINDING (non-security, same class as above and as the existing FIFO/socket nit — NOT fixed
-    here): container_dir.iterdir() on a path that exists but is a regular file raises
-    NotADirectoryError, not StoreError. UNLIKE the nonexistent-directory case above, this one IS
-    reachable from the real call site: Path.exists() returns True for a plain file, so
-    _unpack_bsdtar's `if container_dir.exists():` guard does NOT filter this out before calling
-    _clear_opaque_whiteout. The safety property still holds — the file is never deleted (iterdir()
-    raises before any _rm_rf call), nothing outside dst is touched, no partial state — so this
-    remains a passing/documenting test rather than an xfail: the file survives untouched, which is
-    exactly what "fails closed" requires here, just with the wrong exception type."""
+    FINDING (non-security, same class as above and as the now-fixed FIFO/socket nit — STILL
+    OPEN here, on the _clear_opaque_whiteout code path; the FIFO/socket fix in _merge_tree
+    does not cover this): container_dir.iterdir() on a path that exists but is a regular file
+    raises NotADirectoryError, not StoreError. UNLIKE the nonexistent-directory case above,
+    this one IS reachable from the real call site: Path.exists() returns True for a plain
+    file, so _unpack_bsdtar's `if container_dir.exists():` guard does NOT filter this out
+    before calling _clear_opaque_whiteout. The safety property still holds — the file is never
+    deleted (iterdir() raises before any _rm_rf call), nothing outside dst is touched, no
+    partial state — so this remains a passing/documenting test rather than an xfail: the file
+    survives untouched, which is exactly what "fails closed" requires here, just with the wrong
+    exception type."""
     with tempfile.TemporaryDirectory() as td:
         base = Path(td)
         dst = base / "rootfs"

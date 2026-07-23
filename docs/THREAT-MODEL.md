@@ -86,11 +86,12 @@ filesystem instead of failing or staying contained.
   an earlier layer's symlink (not just at the symlinked path itself), and
   device-node-style special files (`FIFO`/`AF_UNIX` socket — the two
   special-file types representable without root). **No new escape was
-  found in this pass** — see that file's module docstring
-  (`REPORT_ON_FINDINGS`) for the one non-security exception-type
-  inconsistency it did surface (a special-file entry raises
-  `shutil.SpecialFileError`, not `StoreError` — fails closed, wrong
-  exception type, documented not fixed).
+  found in this pass.** The one non-security exception-type inconsistency it
+  did surface (a special-file entry raising `shutil.SpecialFileError`, not
+  `StoreError`) has since been fixed: `_merge_tree` now raises `StoreError`
+  on any non-regular-file entry before `copy2` is called (see
+  `store/test_special_file_handling.py`) — same fail-closed behavior, correct
+  exception type.
 - Hardlinks specifically: `_merge_tree` only ever uses `shutil.copy2`
   (content copy) or `os.symlink` — it never calls `os.link`. A hardlinked
   source file's *content* gets copied into the rootfs, but the destination

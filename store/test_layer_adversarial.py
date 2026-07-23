@@ -19,14 +19,19 @@
 #         destination rootfs. See the per-test docstrings for exactly which of those two
 #         outcomes was empirically observed for that scenario (verified 2026-07-22 against this
 #         checkout — see REPORT_ON_FINDINGS below for the one non-security nit found).
-# REPORT_ON_FINDINGS: no new escape was found in this pass. One minor, NON-security gap: a
-#          FIFO (or, by the same code path, an AF_UNIX socket, or — as root — a char/block
-#          device) entry makes _merge_tree's shutil.copy2() raise shutil.SpecialFileError
-#          (an OSError subclass), NOT store.StoreError. Nothing is written into dst and nothing
-#          escapes — the safety property holds — but a caller catching only StoreError (the
-#          rest of store.py's contract) would not catch this particular crash. Documented, not
-#          fixed here (store.py is off-limits for this track) — see
-#          test_device_node_style_entry_does_not_write_into_rootfs below.
+# REPORT_ON_FINDINGS: no new escape was found in this pass. One minor, NON-security gap was
+#          surfaced and has SINCE BEEN FIXED: a FIFO (or, by the same code path, an AF_UNIX
+#          socket, or — as root — a char/block device) entry made _merge_tree's shutil.copy2()
+#          raise shutil.SpecialFileError (an OSError subclass), NOT store.StoreError. Nothing
+#          was ever written into dst and nothing escaped — the safety property held — but a
+#          caller catching only StoreError (the rest of store.py's contract) would not have
+#          caught that particular crash. _merge_tree now raises StoreError on any non-regular-
+#          file entry BEFORE copy2 is called (same fail-closed behavior, correct exception
+#          type); the strict exception-type assertion lives in
+#          store/test_special_file_handling.py. The two tests below keep their broad
+#          `except Exception` (they assert the SAFETY property — nothing materializes in dst —
+#          not the exception type), so they still pass unchanged and remain valid corpus
+#          entries. See test_device_node_style_entry_does_not_write_into_rootfs below.
 # DEPENDENCIES: stdlib (os, socket, sys, tempfile, pathlib), store.store (_merge_tree, _within,
 #               StoreError, _clear_opaque_whiteout, _apply_file_whiteout)
 # PUBLIC_API: run_all, TESTS; each test_* is also callable directly by pytest
@@ -289,18 +294,21 @@ def test_device_node_style_entry_does_not_write_into_rootfs():
     root to actually create; this stands in for "some non-regular, non-symlink,
     non-directory filesystem entry lands in a layer."
 
-    FINDING (non-security, documented — not fixed here, see module docstring
-    REPORT_ON_FINDINGS): _merge_tree's shutil.copy2() call has NO special-file guard of its
-    own; shutil.copyfile() DOES detect a FIFO specifically (stat.S_ISFIFO) and raises
-    shutil.SpecialFileError immediately — verified empirically not to hang (the check
-    happens before the destination is ever opened) — but that exception is a plain OSError
-    subclass, NOT store.StoreError. A caller that only catches StoreError (as the rest of
-    store.py's public contract implies) will NOT catch this. The SECURITY property this
-    test actually asserts — nothing is written into dst, no partial state, no hang — holds
-    regardless of the exception's type, which is why this is a passing test and not an
-    xfail: no escape occurs, only an inconsistent exception type on this one error path.
-    (The equivalent AF_UNIX-socket special file raises a plain OSError even earlier, for
-    the same reason — Python's open() cannot open a socket as a regular file.)
+    HISTORY (non-security; SINCE FIXED): _merge_tree's shutil.copy2() call had NO
+    special-file guard of its own; shutil.copyfile() detected a FIFO specifically
+    (stat.S_ISFIFO) and raised shutil.SpecialFileError immediately — verified empirically
+    not to hang (the check happens before the destination is ever opened) — but that
+    exception was a plain OSError subclass, NOT store.StoreError, so a caller catching
+    only StoreError (as the rest of store.py's public contract implies) would NOT catch
+    it. The SECURITY property this test asserts — nothing is written into dst, no partial
+    state, no hang — held regardless of the exception's type, which is why this was a
+    passing test and not an xfail. _merge_tree now raises StoreError on any non-regular-
+    file entry before copy2 runs (see store/test_special_file_handling.py for the strict
+    exception-type assertion); this test keeps its broad `except Exception` so it remains
+    a valid corpus entry asserting the safety property directly. (The equivalent AF_UNIX-
+    socket special file raised a plain OSError even earlier, for the same reason —
+    Python's open() cannot open a socket as a regular file; covered by the variant test
+    below.)
     """
     with tempfile.TemporaryDirectory() as td:
         base = Path(td)
@@ -320,7 +328,10 @@ def test_device_node_style_entry_does_not_write_into_rootfs():
 
 def test_device_node_style_entry_socket_variant_does_not_write_into_rootfs():
     """Same class as above using an AF_UNIX socket special file instead of a FIFO — a
-    second, independent representable-without-root stand-in for a device-node entry."""
+    second, independent representable-without-root stand-in for a device-node entry. Now
+    fixed alongside the FIFO case (see store/test_special_file_handling.py); this test
+    keeps its broad `except Exception` to assert the safety property (nothing materializes
+    in dst) directly."""
     with tempfile.TemporaryDirectory() as td:
         base = Path(td)
         dst = base / "rootfs"
