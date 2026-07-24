@@ -508,24 +508,27 @@ class Store:
             oci_dir.mkdir(parents=True, exist_ok=True)
 
             tag = "latest"
-            oci_dest = f"oci:{oci_dir}:{tag}"
+            index_path = oci_dir / "index.json"
 
-            auth_args, redact = _build_registry_auth_args(auth, authfile)
+            if index_path.exists():
+                # Cache hit — avoid re-pulling and hitting registry rate limits.
+                log.info("resolve: cached %s (skipped pull)", image_ref)
+            else:
+                oci_dest = f"oci:{oci_dir}:{tag}"
+                auth_args, redact = _build_registry_auth_args(auth, authfile)
 
-            log.info("resolve: pulling %s -> %s", image_ref, oci_dest)
-            run_kwargs: dict = {"timeout": DEFAULT_NETWORK_TIMEOUT_S}
-            if redact:
-                # Only pass `redact` when there's actually something to mask —
-                # keeps the call shape identical to before this feature existed
-                # for every no-auth resolve() (the overwhelming common case).
-                run_kwargs["redact"] = redact
-            self._run([
-                "skopeo", "copy",
-                "--override-os", "linux",   # UNVERIFIED: FreeBSD needs this flag
-                *auth_args,
-                f"docker://{image_ref}",
-                oci_dest,
-            ], **run_kwargs)
+                log.info("resolve: pulling %s -> %s", image_ref, oci_dest)
+                run_kwargs: dict = {"timeout": DEFAULT_NETWORK_TIMEOUT_S}
+                if redact:
+                    run_kwargs["redact"] = redact
+                self._run([
+                    "skopeo", "copy",
+                    "--remove-signatures",      # avoid permission errors on local sigstore directory
+                    "--override-os", "linux",   # UNVERIFIED: FreeBSD needs this flag
+                    *auth_args,
+                    f"docker://{image_ref}",
+                    oci_dest,
+                ], **run_kwargs)
 
             image_id = self._compute_image_id(oci_dir, tag)
 
@@ -583,6 +586,23 @@ class Store:
         """
         # See _locate_oci_with_retry's rationale: a concurrent resolve() for this
         # same image_ref may still be mid-write on this exact oci_dir.
+        #
+        # Fast-path: if the image dataset/snapshot already exists, skip OCI
+        # lookup entirely. This avoids needing the OCI directory when the image
+        # was already unpacked from a previous session (e.g. after the OCI
+        # cache was cleaned or the original OCI dir was corrupted).
+        if self.backend == BACKEND_ZFS:
+            dataset = f"{self._images_ds}/{image_id}"
+            snapshot_id = f"{dataset}@snap"
+            if self._zfs_snapshot_exists(snapshot_id):
+                log.info("unpack: snapshot %s already exists, skipping OCI lookup", snapshot_id)
+                return snapshot_id
+        else:
+            sentinel = Path(self._images_ds) / image_id / ".jailrun_snap"
+            if sentinel.exists():
+                log.info("unpack(plaindir): %s already unpacked, skipping OCI lookup", sentinel.parent)
+                return str(sentinel.parent)
+
         oci_dir, tag = self._locate_oci_with_retry(image_id)
 
         with self._image_lock(image_id):

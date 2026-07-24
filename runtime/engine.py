@@ -626,7 +626,7 @@ DEFAULT_RCTL_RULES: tuple[str, ...] = (
     "pcpu:sigkill=400",      # up to ~4 cores continuously — NOT CONFIRMED, likely inert (see above); cputime below is the real backstop
     "maxproc:deny=512",      # admission control — CONFIRMED working (see above)
     "cputime:sigkill=3600",  # aggregate CPU-seconds backstop against runaway loops — CONFIRMED working (see above)
-    "readbps:throttle=200m", # disk read throughput ceiling (rate — throttle, not kill)
+    "readbps:throttle=200m", # disk read throughput ceiling — NOTE: confirmed INERT on FreeBSD 15.1-RC2 (rctl accepts the rule but reads complete unthrottled regardless of filesystem or caching); kept in defaults because it's harmless
     "writebps:throttle=200m",# disk write throughput ceiling — CONFIRMED working (see above)
 )
 
@@ -1107,9 +1107,13 @@ async def _run_async(
         snapshot_id = _store_module.base_snapshot(native_base)
         log.info("snapshot: %s", snapshot_id)
     else:
-        log.info("resolving image: %s", image_ref)
-        image_id = _store_module.resolve(image_ref)
-        log.info("image_id: %s", image_id)
+        image_id: str | None = opts.get("image_id")
+        if image_id is None:
+            log.info("resolving image: %s", image_ref)
+            image_id = _store_module.resolve(image_ref)
+            log.info("image_id: %s", image_id)
+        else:
+            log.info("using pre-resolved image_id: %s", image_id)
 
         snapshot_id = _store_module.unpack(image_id)
         log.info("snapshot: %s", snapshot_id)
