@@ -147,6 +147,11 @@ except ImportError:
 
 MANIFEST_FILENAME = "substitution-manifest.json"
 
+# Persistent cache for pre-computed substitution manifests, keyed by image_id.
+# Avoids re-running probe+bakery when the same image is run again.
+# Falls back to <rootfs>/.jailrun/<MANIFEST_FILENAME> (per-clone cache) on miss.
+MANIFEST_CACHE_DIR = "/var/cache/jailrun/manifests"
+
 # Where the native shadow binaries land inside the rootfs clone.
 NATIVE_BIN_DIR = "/jailrun-native/bin"
 
@@ -179,29 +184,44 @@ def _is_jailed() -> bool:
 #   input:
 #     rootfs_path: str — absolute path to the writable ZFS clone root
 #     image_ref: str — image reference (used for logging and passed to probe)
+#     image_id: str | None — resolved image content hash; if provided, enables
+#               a persistent store-level cache at <MANIFEST_CACHE_DIR>/<image_id>.json
 #   output:
 #     manifest: dict[str, Any] — parsed substitution manifest
 #   sideEffects: on cache miss — calls _probe_module.probe(rootfs_path, image_ref)
 #                and _bakery_module.bake(manifest); creates directory
 #                <rootfs_path>/.jailrun/ and writes <rootfs_path>/.jailrun/substitution-manifest.json
-def _load_manifest(rootfs_path: str, image_ref: str) -> dict[str, Any]:
+#                and, if image_id is given, writes a persistent copy to
+#                <MANIFEST_CACHE_DIR>/<image_id>.json
+def _load_manifest(rootfs_path: str, image_ref: str, image_id: str | None = None) -> dict[str, Any]:
     """
-    Load the substitution manifest for *image_ref* from the rootfs clone.
 
-    Probe + bakery are expected to have written the manifest into the rootfs at
-    a well-known path, OR into the store's metadata area.  We check both.
-    Convention: <rootfs_path>/.jailrun/<MANIFEST_FILENAME>
+    Load the substitution manifest for *image_ref*.
+
+    Checks, in order:
+      1. image-level persistent cache at <MANIFEST_CACHE_DIR>/<image_id>.json
+      2. per-clone cache at   <rootfs_path>/.jailrun/<MANIFEST_FILENAME>
+      3. probe + bakery (slow path)
 
     Falls back to calling probe + bakery inline if the manifest is absent
     (first-run / no pre-bake).  This is the slow path.
     """
-    # START_CHECK_MANIFEST_CACHE
+    # START_CHECK_PERSISTENT_CACHE
+    if image_id:
+        persistent = Path(MANIFEST_CACHE_DIR) / f"{image_id}.json"
+        if persistent.exists():
+            log.debug("manifest cache hit (image_id=%s)", image_id)
+            with persistent.open() as fh:
+                return json.load(fh)
+    # END_CHECK_PERSISTENT_CACHE
+
+    # START_CHECK_CLONE_CACHE
     candidate = Path(rootfs_path) / ".jailrun" / MANIFEST_FILENAME
     if candidate.exists():
         log.debug("manifest found at %s", candidate)
         with candidate.open() as fh:
             return json.load(fh)
-    # END_CHECK_MANIFEST_CACHE
+    # END_CHECK_CLONE_CACHE
 
     # START_PROBE_BAKE_SLOW_PATH
     log.info(
@@ -210,10 +230,18 @@ def _load_manifest(rootfs_path: str, image_ref: str) -> dict[str, Any]:
     manifest = _probe_module.probe(rootfs_path, image_ref)
     manifest = _bakery_module.bake(manifest)
 
-    # Cache for next run.
+    # Write per-clone cache.
     candidate.parent.mkdir(parents=True, exist_ok=True)
     with candidate.open("w") as fh:
         json.dump(manifest, fh, indent=2)
+
+    # Write persistent cache keyed by image_id (skips probe+bakery on re-run).
+    if image_id:
+        persistent = Path(MANIFEST_CACHE_DIR) / f"{image_id}.json"
+        persistent.parent.mkdir(parents=True, exist_ok=True)
+        with persistent.open("w") as fh:
+            json.dump(manifest, fh, indent=2)
+        log.debug("persistent manifest cache written for image_id=%s", image_id)
 
     return manifest
     # END_PROBE_BAKE_SLOW_PATH
@@ -1095,6 +1123,7 @@ async def _run_async(
     THIN_BASE_DIRS = ("/bin", "/lib", "/libexec", "/sbin", "/usr")
     native_base: str | None = None
     thin_base: str | None = None
+    image_id: str | None = None
     if image_ref.startswith("nativebase:"):
         native_base = image_ref.split(":", 1)[1]
     elif image_ref.startswith("thinbase:"):
@@ -1107,7 +1136,7 @@ async def _run_async(
         snapshot_id = _store_module.base_snapshot(native_base)
         log.info("snapshot: %s", snapshot_id)
     else:
-        image_id: str | None = opts.get("image_id")
+        image_id = opts.get("image_id")
         if image_id is None:
             log.info("resolving image: %s", image_ref)
             image_id = _store_module.resolve(image_ref)
@@ -1174,7 +1203,7 @@ async def _run_async(
                 native_base or thin_base,
             )
         else:
-            manifest = _load_manifest(rootfs_path, image_ref)
+            manifest = _load_manifest(rootfs_path, image_ref, image_id=image_id)
             log.info(
                 "manifest loaded: %d binaries, linuxulator.required=%s",
                 len(manifest.get("binaries", [])),

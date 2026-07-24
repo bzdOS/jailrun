@@ -28,6 +28,7 @@
     "python310": "/usr/local/bin/python3.10",
     "gtar": "/usr/local/bin/gtar",
     "dash": "/usr/local/bin/dash",
+    "gnugrep": "/usr/local/bin/grep",
     "meson": "/usr/local/bin/meson",
     "zsh": "/usr/local/bin/zsh",
     "bzip2": "/usr/local/bin/bzip2",
@@ -38,6 +39,7 @@
     "php83": "/usr/local/bin/php",
     "py311-pip": "/usr/local/bin/pip",
     "scons-py312": "/usr/local/bin/scons",
-    "openjdk21": "/usr/local/openjdk21/bin/java"
+    "openjdk21": "/usr/local/openjdk21/bin/java",
+    "py312-uv": "/usr/local/bin/uv"
   }
 }

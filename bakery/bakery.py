@@ -698,7 +698,20 @@ def bake(manifest: dict[str, Any]) -> dict[str, Any]:
         }
         return updated
 
-    snapshot_id = store.register_base(base_name, provision_cmd)
+    try:
+        snapshot_id = store.register_base(base_name, provision_cmd)
+    except Exception as exc:
+        warnings = warnings + [f"base registration failed: {exc}"]
+        log.warning("bakery: base registration failed — %s", exc)
+        updated = fill_artifact_paths(manifest, plan)
+        updated["_bakery"] = {
+            "base_name": base_name,
+            "snapshot_id": None,
+            "plan": plan_dict,
+            "warnings": warnings,
+        }
+        return updated
+
     log.info("bakery: registered base %s -> %s", base_name, snapshot_id)
     # END_REGISTER_BASE
 
