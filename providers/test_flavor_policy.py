@@ -89,17 +89,15 @@ def test_loader_exposes_coreutils_flavor_correctly():
     assert COREUTILS_FLAVOR.get("tar") == "gnu"
 
 
-# CONTRACT: provider-map.json's binary->provider data matches the pinned fixture
-# (EXPECTED_PROVIDER_MAP, reused from providers/test_registry_roundtrip.py). This
-# originally proved the coreutils-flavor work left provider-map.json UNCHANGED;
-# provider-map.json has since been intentionally corrected (2026-07-24, 0.3 backfill:
-# pkg:gcc/llvm stubs -> real gcc16/llvm22, scons -> scons-py312, riscv32 port
-# removed). It now re-pins the current, corrected map from a second file — catching
-# any accidental drift, on top of test_registry_roundtrip's own round-trip.
+# CONTRACT: provider-map.json's binary->provider data is a SUPERSET of the pinned
+# fixture (EXPECTED_PROVIDER_MAP, reused from providers/test_registry_roundtrip.py).
+# Every original entry is preserved; the expanded registry (≥150 entries) meets the
+# 0.3 exit criterion.
 def test_provider_map_matches_pinned_fixture():
     assert isinstance(PROVIDER_MAP, dict)
-    assert len(PROVIDER_MAP) == 53 == len(EXPECTED_PROVIDER_MAP)
-    assert PROVIDER_MAP == EXPECTED_PROVIDER_MAP
+    assert len(PROVIDER_MAP) >= 150, f"0.3 exit requires ≥150, got {len(PROVIDER_MAP)}"
+    for k, v in EXPECTED_PROVIDER_MAP.items():
+        assert PROVIDER_MAP.get(k) == v, f"original entry {k!r}:{v!r} missing or changed"
 
 
 TESTS = [

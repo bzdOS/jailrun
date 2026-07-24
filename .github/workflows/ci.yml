@@ -3,6 +3,12 @@ name: CI
 on:
   push:
   pull_request:
+  schedule:
+    # Weekly drift check — Sunday 06:00 UTC. On ubuntu-latest (no FreeBSD) this
+    # runs the lightweight checks: schema validation, registry consistency, and
+    # evidence-record integrity. The full L1/L2 re-verification (pkg-exists +
+    # smoke-jail) requires a FreeBSD runner and is tracked separately.
+    - cron: '0 6 * * 0'
 
 jobs:
   test:
