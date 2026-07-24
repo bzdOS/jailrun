@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    # jailrun's runtime only *means* anything on FreeBSD (jails/ZFS/Linuxulator) —
+    # this CI runs the linux-host-safe half: py_compile, shell syntax, unit tests,
+    # and schema validation. It exists so contract-drift bugs like the
+    # `from probe.probe import Probe` ImportError (2026-07-18 — probe.py
+    # only ever exported a module-level probe() function) get caught on every push
+    # instead of silently sitting in a runbook until someone runs it by hand on a
+    # real FreeBSD host. FreeBSD-only steps stay in deploy/prove-on-freebsd.sh.
+    #
+    # Kept in lockstep with ./ci-local.sh — the same gates run locally without
+    # Actions while pushing this workflow is OAuth-scope-blocked (needs the repo
+    # token's `workflow` scope; tracked separately).
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dev dependencies
+        run: python -m pip install --upgrade pip && pip install pytest jsonschema
+
+      - name: py_compile all modules
+        run: |
+          python -m py_compile \
+            store/store.py \
+            probe/probe.py \
+            bakery/bakery.py \
+            runtime/engine.py \
+            runtime/cli.py \
+            runtime/lifecycle.py \
+            runtime/_mocks.py \
+            runtime/rundb.py \
+            runtime/gc.py \
+            runtime/explain.py \
+            runtime/scan.py \
+            runtime/netpolicy.py \
+            runtime/netops.py \
+            providers/__init__.py \
+            providers/backfill.py
+
+      - name: Shell syntax check (*.sh)
+        run: |
+          set -eu
+          for f in deploy/*.sh store/*.sh probe/*.sh bakery/*.sh runtime/*.sh; do
+            echo "sh -n $f"
+            sh -n "$f"
+          done
+
+      - name: Unit tests (full suite)
+        run: python -m pytest -q
+
+      - name: Substitution manifest matches its own schema
+        run: python .github/scripts/validate_manifest_schema.py
+
+      - name: Provider registry data validates against its schema
+        run: python .github/scripts/validate_provider_data.py

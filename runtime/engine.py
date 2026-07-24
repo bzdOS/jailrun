@@ -387,6 +387,7 @@ def _build_jail_conf(
     linuxulator: bool,
     network: str = "none",
     allow_raw_sockets: bool = False,
+    ip4_addr: str | None = None,
 ) -> str:
     """
     Render a minimal jail.conf snippet for this run.
@@ -406,8 +407,11 @@ def _build_jail_conf(
     esphome compile needs no network during `jexec`. Callers that genuinely need
     network at exec time must opt in explicitly (`--network inherit` in cli.py).
     """
-    if network not in ("none", "inherit"):
-        raise ValueError(f"network must be 'none' or 'inherit', got {network!r}")
+    if network not in ("none", "inherit", "allow"):
+        raise ValueError(f"network must be 'none', 'inherit', or 'allow', got {network!r}")
+    if network == "allow" and not ip4_addr:
+        # Destination-scoped egress (0.4) needs a dedicated alias IP to tag+NAT.
+        raise ValueError("network='allow' requires ip4_addr (the jail's alias IP)")
 
     lines: list[str] = [
         f"{jail_name} {{",
@@ -453,6 +457,13 @@ def _build_jail_conf(
 
     if network == "none":
         lines += ["    ip4 = disable;", "    ip6 = disable;"]
+    elif network == "allow":
+        # Destination-scoped (0.4, A2 shared-stack): the jail gets ONLY its alias
+        # IP; pf tags+NATs its egress to the allowed destinations (engine.py
+        # applies the sub-anchor before jail -c). ip6 stays disabled so traffic
+        # can't sneak out v6 around the v4 filter.
+        lines.append(f"    ip4.addr = {ip4_addr!r};")
+        lines.append("    ip6 = disable;")
     else:
         lines += ["    ip4 = inherit;", "    ip6 = inherit;"]
 
