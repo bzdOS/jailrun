@@ -179,6 +179,69 @@ The agent bet, part two — breadth.
 p50 jail-creation latency under 3s on reference hardware (4-core FreeBSD VM,
 SSD-backed ZFS).
 
+### 0.8 — Distribution & packaging (S)
+
+Before 1.0, running jailrun must not require `git clone && pip install`.
+
+- **Single-command install.** `pip install jailrun` or `pkg install jailrun`
+  on FreeBSD produces a working binary. Dependencies vendored or declared
+  as standard package dependencies (not "see MANUAL.md for setup").
+- **Binary distribution.** A self-contained binary (zipapp, Nuitka/PyInstaller)
+  that a user can drop onto any FreeBSD 14.x/15.x host and run immediately —
+  no Python version management, no venv, no `PYTHONPATH` games. The current
+  `bin/jailrun` shim works from the repo root; for 0.8 it must work from
+  anywhere.
+- **`jailrun version`** prints the real git describe tag + FreeBSD version +
+  Python version — not a hardcoded stub. Useful for bug reports.
+- **Man page / `jailrun help`.** Every subcommand has a `--help` that is
+  complete and actionable; `man jailrun` renders the same content.
+- **Release workflow.** GitHub Release with the binary artifact attached,
+  auto-built by CI on tag push. `CHANGELOG.md` is the canonical release
+  notes, not a manually-rewritten GitHub description.
+
+**Exit:** a first-time FreeBSD user can `pkg install jailrun && jailrun run
+--help` without reading anything else and get a useful response.
+
+### 0.9 — Production hardening & soak (M)
+
+The gap between "works for me on a dev VM" and "I'd run this in prod for
+untrusted user code". Each item is sized to be independently verifiable.
+
+- **GC proven on crash residue.** `jailrun gc --fix` has been exercised
+  against a corpus of real crash artifacts (SIGKILL mid-`skopeo copy`,
+  mid-`jail -c`, mid-`pkg install`, mid-`jexec`) and leaves zero orphaned
+  jails, datasets, or mounts. The soak test (below) generates these
+  artifacts naturally.
+- **Soak test: 1000 runs at 8-way parallelism** on the reference hardware
+  (4-core FreeBSD VM, SSD ZFS). Measures: wall-clock throughput, max
+  concurrent jails, rctl isolation (one OOM-killed run must never affect
+  its neighbour), teardown latency, and ZFS ARC pressure. Zero leaks across
+  the full batch.
+- **`--network allow` live exit-test on FreeBSD.** A CI job (or deploy
+  runbook on .185) that creates a jail with `--network allow=pkg.freebsd.org`
+  and verifies that `fetch https://pkg.freebsd.org` succeeds but `fetch
+  https://github.com` is blocked. This is the 0.4 exit criterion that has
+  not yet been automated.
+- **Signal resilience.** What happens when jailrun itself receives SIGKILL
+  at each stage of the pipeline? Every stage (resolve, unpack, clone,
+  shadow, jail -c, jexec, jail -r, destroy) should either complete or leave
+  a state that `jailrun gc --fix` can clean up. No partial ZFS clones, no
+  orphaned loopback aliases, no stale pf anchors.
+- **`jailrun doctor` checks the host pf anchor hooks.** Verifies that
+  `/etc/pf.conf` contains `nat-anchor "jailrun/*"` and `anchor "jailrun/*"`
+  — without them, `--network allow` loads a sub-anchor that is never
+  evaluated, giving the jail unrestricted egress (fail-open). The check
+  must refuse to run before any `allow`-network jail is created.
+- **Performance budget revisited.** Time-to-`jexec` for the fast path
+  (cached image, no Linuxulator, `--network none`): target p50 under 2s
+  from `engine.run()` entry to `jexec` invocation. Profile and eliminate
+  the biggest fixed overheads.
+
+**Exit:** soak green (1000 × 8-way, zero leaks); `--network allow` exit-test
+green; SIGKILL-at-every-stage corpus leaves no orphans after `gc --fix`;
+doctor catches missing pf hooks. Everything that will ship in 1.0 has been
+exercised under load, not just unit-tested.
+
 ### 1.0 — Production readiness (S)
 
 The final gate — not a feature milestone, a stability and documentation
