@@ -1,0 +1,26 @@
+#!/bin/sh
+#
+# pkg-install — post-install setup for jailrun.
+# Called by `pkg install` via the port's pkg-plist @postexec.
+# Creates jailrun's runtime directories and sets up ZFS datasets
+# if the pool is available (idempotent).
+
+set -eu
+
+JAILRUN_ZPOOL="${JAILRUN_ZPOOL:-zroot}"
+
+# Runtime directories
+for d in /var/jailrun/images /var/jailrun/bases /var/jailrun/runs \
+         /var/cache/jailrun/oci /var/cache/jailrun/manifests \
+         /var/db/jailrun /var/log/jailrun; do
+    mkdir -p "$d"
+done
+
+# ZFS datasets (best-effort — skip if pool not found)
+if zfs list "$JAILRUN_ZPOOL" >/dev/null 2>&1; then
+    for ds in jailrun/images jailrun/bases jailrun/runs; do
+        if ! zfs list "$JAILRUN_ZPOOL/$ds" >/dev/null 2>&1; then
+            zfs create -o mountpoint="/var/${ds}" "$JAILRUN_ZPOOL/$ds"
+        fi
+    done
+fi

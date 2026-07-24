@@ -1,0 +1,260 @@
+.\" jailrun man page
+.\"
+.\" To view:   man ./man/man1/jailrun.1
+.\" To install: cp man/man1/jailrun.1 /usr/local/share/man/man1/
+.\"
+.Dd July 24, 2026
+.Dt JAILRUN 1
+.Os
+.Sh NAME
+.Nm jailrun
+.Nd native-first OCI runtime for FreeBSD jails
+.Sh SYNOPSIS
+.Nm
+.Op Fl h
+.Cm COMMAND
+.Op Ar args Ns ...
+.Pp
+.Nm run
+.Op Fl -rm
+.Op Fl v Ar HOST:CTR Ns Op :ro
+.Op Fl e Ar KEY=VALUE
+.Op Fl w Ar DIR
+.Op Fl -timeout Ar SECONDS
+.Op Fl -network Ar NETWORK
+.Op Fl -allow-raw-sockets
+.Op Fl -no-rctl
+.Op Fl -allow-unrestricted-devfs
+.Op Fl -rctl-rule Ar ACTION:VALUE
+.Op Fl it
+.Ar IMAGE
+.Op Ar CMD Op Ar ARGS Ns ...
+.Pp
+.Nm exec
+.Op Fl e Ar KEY=VALUE
+.Op Fl w Ar DIR
+.Op Fl -timeout Ar SECONDS
+.Ar JAIL_NAME
+.Ar CMD
+.Op Ar ARGS Ns ...
+.Pp
+.Nm pull
+.Op Fl -authfile Ar PATH
+.Op Fl -creds Ar USER:PASS
+.Ar IMAGE
+.Pp
+.Nm ps
+.Op Fl a
+.Pp
+.Nm logs
+.Ar JAIL_NAME
+.Pp
+.Nm explain
+.Op Fl -manifest Ar FILE
+.Op Fl -format Brq text | json
+.Op Ar IMAGE
+.Pp
+.Nm scan
+.Op Fl -format Brq text | json
+.Ar IMAGE
+.Op Ar IMAGE ...\&
+.Pp
+.Nm doctor
+.Op Fl -format Brq text | json
+.Pp
+.Nm gc
+.Op Fl -fix
+.Op Fl -format Brq text | json
+.Pp
+.Nm version
+.Pp
+.Nm freeze
+.Ar JAIL_NAME
+.Pp
+.Nm thaw
+.Ar JAIL_NAME
+.Pp
+.Nm hibernate
+.Ar JAIL_NAME
+.Pp
+.Nm restore
+.Ar JAIL_NAME
+.Sh DESCRIPTION
+.Nm
+runs Linux and FreeBSD OCI images inside FreeBSD jails.
+It resolves an image reference via
+.Xr skopeo 1 ,
+unpacks the OCI layers into a ZFS dataset, probes every ELF binary to
+determine whether a native FreeBSD substitute exists, and creates a
+jail with the image rootfs as its filesystem.
+.Pp
+Binaries for which a native FreeBSD substitute is known (e.g.,
+.Nm python3 ,
+.Nm bash ,
+.Nm git )
+are shadowed with the native version via the bakery system.
+All other Linux binaries run transparently through the Linuxulator
+(FreeBSD's Linux ABI compatibility layer).
+.Pp
+The default network mode is
+.Sq none
+\(em the jail has no connectivity.
+Use
+.Fl network Ns = Ns Ar allow Ns Li = Ns Ar host Ns Op : Ns Ar port
+for destination-scoped egress.
+.Sh COMMANDS
+.Bl -tag -width "explain"
+.It Cm run
+Run a command in a new jail container from an OCI image.
+Flags mirror
+.Xr docker 1 Ns 's
+.Fl rm ,
+.Fl v ,
+.Fl e ,
+.Fl w ,
+and
+.Fl it .
+.Pp
+.Fl -timeout
+limits wall-clock execution time.
+.Pp
+.Fl -network
+controls network access:
+.Sq none ,
+.Sq inherit ,
+or
+.Sq allow= Ns Ar host Ns Op : Ns Ar port Ns Op ,... .
+.Pp
+.Fl -rctl-rule
+applies a FreeBSD rctl resource limit
+.Pq e.g. Ic maxproc:deny=100 .
+.Pp
+.Fl -allow-unrestricted-devfs
+relaxes the default restrictive
+.Xr devfs 8
+ruleset (needed for some toolchains that access
+.Pa /dev/random
+or
+.Pa /dev/tap ) .
+.It Cm exec
+Run an additional command inside an already-running jail
+(similar to
+.Ic docker exec ) .
+Non-interactive only (no PTY).
+.It Cm pull
+Resolve and unpack an image into the local store cache
+without creating a jail.
+Useful to pre-warm a batch of images ahead of time.
+.It Cm ps
+List jailrun-managed runs from the run-state database.
+.Fl a
+shows exited/killed history in addition to running jails.
+.It Cm logs
+Print a run's captured stdout/stderr from the run-state database.
+The jail must be named as shown by
+.Ic jailrun ps .
+.It Cm explain
+Answer \(lqwill this image run under jailrun, how, and what would make it
+better\(rq by rendering the substitution manifest.
+Supports
+.Fl -manifest Ar FILE
+to load a pre-produced manifest from disk (works on any host),
+or
+.Ar IMAGE
+to resolve it the same way
+.Ic jailrun run
+does (FreeBSD host only).
+Output format:
+.Sq text
+(default) or
+.Sq json .
+.It Cm scan
+Run probe() against one or more images and report an aggregate
+native-vs-linuxulator summary across the batch.
+FreeBSD host only.
+.It Cm doctor
+Inspect the host system and report jailrun readiness: required tools
+.Pq Xr skopeo 1 , Xr bsdtar 1 ,
+kernel modules
+.Pq Xr linux 4 ,
+ZFS pool existence, and pkg trust key setup.
+Prints the exact fix command for each failing check.
+.It Cm gc
+Find and clean up orphaned jails, ZFS datasets, and
+run-state database rows left behind after an unclean shutdown.
+Default: dry-run only.
+.Fl -fix
+applies the cleanup actions.
+.It Cm version
+Print the jailrun version (git describe), FreeBSD release, and
+Python version.
+.It Cm freeze , thaw , hibernate , restore
+Lifecycle operations delegated to
+.Nm bsdos_lifecycled .
+.Ic freeze
+SIGSTOPs a jail's processes (0% CPU, state retained in RAM).
+.Ic thaw
+SIGCONTs a frozen jail.
+.Ic hibernate
+ZFS-snapshots the jail's rootfs then SIGSTOPs (RAM-light).
+.Ic restore
+reverts a hibernated or frozen jail to running state.
+.El
+.Sh FILES
+.Bl -tag -width ".Pa /var/jailrun/images/" -compact
+.It Pa /var/jailrun/images/
+Unpacked OCI image rootfs datasets
+.Pq ZFS datasets: Cm jailrun/images/ Ns Ar image_id
+.It Pa /var/jailrun/bases/
+Native-substitution base datasets
+.Pq Cm jailrun/bases/
+.It Pa /var/cache/jailrun/oci/
+OCI image layout cache
+.Pq Xr skopeo 1
+.It Pa /var/cache/jailrun/manifests/
+Pre-computed substitution manifests
+.Pq keyed by image_id
+.It Pa /var/db/jailrun/
+Run-state SQLite database + per-run log files
+.It Pa /var/log/jailrun/
+Runtime log output
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width "JAILRUN_REGISTRY_AUTHFILE"
+.It Ev JAILRUN_EXTRACT_IN_JAIL
+When set to
+.Sq 1 ,
+OCI layer extraction runs inside a throwaway jail
+(slower but isolates the tar parser from the host).
+.It Ev JAILRUN_REGISTRY_AUTHFILE
+Path to a skopeo-compatible registry auth file
+(default: not set; anonymous pull).
+.It Ev JAILRUN_STORE_BACKEND
+Storage backend:
+.Sq zfs
+(default, requires ZFS) or
+.Sq plaindir
+(flat directory, for testing).
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Sh EXAMPLES
+.Bd -literal
+$ jailrun run --rm alpine:latest sh -c 'echo hello from alpine'
+$ jailrun run --rm --network allow=pypi.org:443 ubuntu:24.04 pip install torch
+$ jailrun pull debian:stable-slim
+$ jailrun explain debian:stable-slim --format json
+$ jailrun doctor
+$ jailrun gc --fix
+.Ed
+.Sh SEE ALSO
+.Xr jail 8 ,
+.Xr zfs 8 ,
+.Xr skopeo 1 ,
+.Xr linux 4 ,
+.Xr devfs 8 ,
+.Xr rctl 8
+.Sh AUTHORS
+.An Andrey Bodrov Aq Mt ap.bodrov@gmail.com
+.Pp
+Source repository: https://github.com/bzdOS/jailrun

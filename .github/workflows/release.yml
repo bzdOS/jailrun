@@ -1,0 +1,37 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # needed for git describe
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build zipapp
+        run: python scripts/build_zipapp.py
+
+      - name: Generate checksum
+        run: |
+          cd dist
+          sha256sum jailrun.pyz > jailrun.pyz.sha256
+          cat jailrun.pyz.sha256
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: jailrun ${{ github.ref_name }}
+          body_path: CHANGELOG.md
+          files: |
+            dist/jailrun.pyz
+            dist/jailrun.pyz.sha256
+          fail_on_unmatched_files: true

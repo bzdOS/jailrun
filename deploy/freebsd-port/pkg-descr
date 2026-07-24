@@ -1,0 +1,18 @@
+jailrun is a docker-run-shaped OCI runtime for FreeBSD, backed by jails.
+
+It runs Linux and FreeBSD OCI images inside FreeBSD jails without a VM
+or Docker daemon. Resolves images via skopeo(1), unpacks layers into ZFS
+datasets, substitutes Linux ELF binaries with native FreeBSD ports where
+available (the "bakery" system), and falls back to the Linuxulator for
+everything else.
+
+Key features:
+  - Native-first substitution: python3, bash, git, curl, ccache, etc.
+    run as native FreeBSD binaries, not emulated.
+  - Linuxulator fallback: any Linux binary without a native substitute
+    runs transparently through FreeBSD's Linux ABI compatibility layer.
+  - Default-deny network: jails have no network access unless explicitly
+    allowed via --network allow=host[:port].
+  - Resource controls: rctl limits (CPU, memory, I/O) per run.
+  - Extraction jail: OCI layer unpacking runs in a throwaway jail for
+    defense-in-depth against tar-parser exploits.

@@ -5,3 +5,7 @@ venv/
 *.log
 /scratch/
 *.tmp
+/dist/
+*.egg-info/
+/__pycache__/
+/build/

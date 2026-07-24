@@ -43,9 +43,11 @@ import sys
 
 
 # ---------------------------------------------------------------------------
-# Version stub — replaced once we have a real release mechanism.
+# Version — auto-detected from git describe, VERSION file, or default.
 # ---------------------------------------------------------------------------
-JAILRUN_VERSION = "0.2.0"
+from runtime._version import jailrun_version, platform_info, version_banner
+
+JAILRUN_VERSION = jailrun_version()
 
 
 # ---------------------------------------------------------------------------
@@ -483,6 +485,22 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Show jailrun version information",
     )
 
+    # ---- help ---------------------------------------------------------------
+    help_p = sub.add_parser(
+        "help",
+        help="Show detailed help (man-page-level detail)",
+        description=(
+            "Display the jailrun man page (via `man` if available, "
+            "or a text summary)."
+        ),
+    )
+    help_p.add_argument(
+        "topic",
+        nargs="?",
+        default=None,
+        help="Subcommand to get help for (default: overall usage).",
+    )
+
     # ---- doctor ------------------------------------------------------------
     doctor_p = sub.add_parser(
         "doctor",
@@ -910,10 +928,37 @@ def _cmd_logs(args: argparse.Namespace) -> int:
 
 # CONTRACT: format JAILRUN_VERSION + runtime/host strings -> print 3 lines to stdout -> return 0
 def _cmd_version(_args: argparse.Namespace) -> int:
-    print(f"jailrun version {JAILRUN_VERSION}")
-    print("runtime: FreeBSD jails + ZFS (freebsd-host only)")
-    print("host build: linux-host/Linux (design + scaffold)")
+    print(version_banner())
     return 0
+
+
+# _cmd_help:start
+#   purpose: display man-page-level help; try man(1) first, fall back to argparse --help
+#   input:
+#     args: argparse.Namespace — parsed args; args.topic may name a subcommand
+#   output:
+#     exit_code: int — 0 on success, 1 on error
+#   sideEffects: may spawn man(1) subprocess; falls back to argparse help
+# _cmd_help:end
+def _cmd_help(args: argparse.Namespace) -> int:
+    if args.topic:
+        sub_parser = _build_parser()._subparsers._group_actions[0].choices.get(args.topic)
+        if sub_parser:
+            sub_parser.print_help()
+            return 0
+        print(f"jailrun: no such subcommand {args.topic!r}", file=sys.stderr)
+        return 1
+    try:
+        import subprocess, os
+        man_path = os.path.join(os.path.dirname(__file__), "..", "man", "man1", "jailrun.1")
+        r = subprocess.run(["man", man_path], capture_output=False, timeout=10)
+        return r.returncode
+    except Exception:
+        pass
+    # Fall back to built-in help
+    _build_parser().print_help()
+    return 0
+# _cmd_help:end
 
 
 # _cmd_doctor:start
@@ -1013,6 +1058,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_scan(args)
     if args.subcommand == "version":
         return _cmd_version(args)
+    if args.subcommand == "help":
+        return _cmd_help(args)
     if args.subcommand == "doctor":
         return _cmd_doctor(args)
     if args.subcommand == "gc":

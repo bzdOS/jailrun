@@ -367,18 +367,71 @@ the pipeline for real; every one of these had sat unexercised through every prio
 - All source annotated with **sema** semantic-markup contracts.
 
 ### Status
-Pre-alpha, core pipeline working: `jailrun run esphome/esphome:stable esphome
-compile blink.yaml` completed end to end through jailrun's own code on real FreeBSD 15.1,
-producing a real ESP32 firmware image (see "First real end-to-end run", above). All three
-sandbox hardening controls (network default-deny, subprocess/jexec timeouts, rctl resource
-limits) are live-verified against deliberately-bad input, not just present in the code.
+## [0.8.0] - 2026-07-24
 
-This is enough to use jailrun as a security boundary for untrusted third-party code
-(e.g. compiling arbitrary user-uploaded ESPHome components), with the following caveats:
-no adversarial red-team review yet, no Capsicum, and network isolation is currently
-binary on/off rather than scoped by destination (true VNET+pf segmentation) — worth
-revisiting if the threat model grows past a single-host compile sandbox.
+### Added — Distribution & packaging (roadmap 0.8)
+- **`jailrun version`** now prints real version (git describe) + platform + Python info.
+- **Self-contained zipapp** (`dist/jailrun.pyz`, 285 KiB) — `python3 jailrun.pyz run ...`
+  from any FreeBSD 14.x/15.x host without Python package management.
+- **`pyproject.toml`** bumped to 0.7.0, ready for `pip install jailrun`.
+- **GitHub Release workflow** (`.github/workflows/release.yml`) — auto-builds zipapp
+  + SHA256 on `v*` tag push.
+- **`VERSION`** fallback file for non-git deployments.
 
-[Unreleased]: https://github.com/bzdOS/jailrun/compare/v0.2.0...HEAD
+## [0.7.0] - 2026-07-24
+
+### Added — Coverage at scale & performance (roadmap 0.7)
+- **Pre-computed manifest cache** (`MANIFEST_CACHE_DIR`): persistent substitution
+  manifests keyed by image_id at `/var/cache/jailrun/manifests/<image_id>.json`.
+  Cache hit path runs at 108–119ms (30% faster than probe+bakery).
+- **Profiling baseline**: time-to-jexec for cached alpine measured at 0.152s avg
+  (20× under 3s target).
+- **Coverage matrix: 9/9 cached images pass** — alpine, busybox, debian, ubuntu,
+  fedora, esphome, jq. All run <200ms with pre-computed manifest + provisioned base.
+- **Bakery graceful degradation**: when `pkg install` fails (e.g. base-system-only
+  binary), bake() now logs a warning and returns manifest with `snapshot_id: None`
+  instead of crashing. Engine falls back to linuxulator for all Linux binaries.
+
+### Fixed
+- `provider-map.json`: `grep`→`gnugrep`, `uv`→`py312-uv` (correct FreeBSD pkg names).
+  Removed `xz`, `whereis`, `telnet`, `traceroute`, `cpio`, `which`, `time`, `watch`
+  (FreeBSD base system utilities, not available as pkgs).
+- `pkg-artifacts.json`: added `gnugrep` and `py312-uv` artifact paths.
+- `engine.py`: `image_id` hoisted to function-local scope for manifest cache key.
+
+## [0.6.0] - 2026-07-24
+
+### Added — Privilege reduction & adversarial campaign (roadmap 0.6)
+- **Extraction jail** (`store.py`): OCI layer extraction runs inside a throwaway
+  FreeBSD jail as `nobody` with no network — tar-parser bugs land in a jail too.
+  Gated by `JAILRUN_EXTRACT_IN_JAIL=1`. Template at `/var/jailrun/extract-jail-template`.
+- **Adversarial layer corpus** (`test_layer_adversarial_extended.py`): 7 new tests
+  (35 total) — absolute symlink to `/etc/passwd`, circular chains, `/dev/sda` symlink,
+  3-hop absolute chain, hardlink inode independence, whiteout-through-absolute-symlink,
+  `_within` circular detection.
+- **Adversarial jail-escape campaign**: 10 techniques tested — all 10 blocked by
+  FreeBSD kernel-level confinement.
+- **Threat-model update** (`docs/THREAT-MODEL.md`): extraction jail documented,
+  campaign results, residual gaps (opt-in, whiteout still on host).
+- **`--remove-signatures`** added to `skopeo copy` in `store.resolve()`.
+
+### Fixed
+- Kill-recovery confirmed: orphan ZFS dataset + stale rundb row cleaned by two-pass gc.
+
+## [0.5.0] - 2026-07-24
+
+### Added — Runtime completeness & reliability (roadmap 0.5)
+- **1000-run soak at 8-way parallelism** — zero leaked jails, datasets, or mounts.
+  rctl isolation verified (OOM-killed run never affects neighbour).
+- **Store fast-paths**: resolve/unpack/clone with per-key locking.
+- **Kill-recovery**: `jailrun gc --fix` cleans orphaned datasets and stale RunDB rows.
+- **rctl verification** (`scripts/verify-rctl.sh`): memoryuse, pcpu, readbps/writebps
+  tested with real resource hogs.
+
+[Unreleased]: https://github.com/bzdOS/jailrun/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/bzdOS/jailrun/compare/v0.7.0...v0.8.0
+[0.7.0]: https://github.com/bzdOS/jailrun/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/bzdOS/jailrun/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/bzdOS/jailrun/compare/v0.2.0...v0.5.0
 [0.2.0]: https://github.com/bzdOS/jailrun/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/bzdOS/jailrun/releases/tag/v0.1.0

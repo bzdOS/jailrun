@@ -1,0 +1,23 @@
+[
+${TYPE}=<<EOM
+jailrun is installed to ${PREFIX}/bin/jailrun.
+
+Before first use, verify host readiness:
+
+    jailrun doctor
+
+Required host configuration (checked by doctor):
+  - ZFS pool with datasets for images, bases, and runs
+  - linux64 kernel module loaded (for Linuxulator support)
+  - kern.racct.enable=1 in /boot/loader.conf (for rctl resource limits)
+  - skopeo(1) from sysutils/skopeo
+
+Optional, recommended for full compatibility:
+  - pkg install bash gsed coreutils gmake curl git gtar gnugrep \\
+      diffutils patch findutils less ccache openssh-portable
+
+See jailrun(1) for full documentation, or run:
+
+    jailrun help
+EOM
+]
