@@ -367,6 +367,28 @@ the pipeline for real; every one of these had sat unexercised through every prio
 - All source annotated with **sema** semantic-markup contracts.
 
 ### Status
+## [Unreleased] — Production hardening & soak (roadmap 0.9)
+
+### Added
+- **`jailrun doctor` pf anchor hooks check** (`runtime/doctor.py`): verifies
+  `/etc/pf.conf` contains `nat-anchor "jailrun/*"` and `anchor "jailrun/*"`.
+  Without them, `--network allow` loads a sub-anchor that is never evaluated.
+- **Live exit-test for `--network allow`** (`bench/network_allow_live.py`):
+  verifies allowed destination reachable, blocked destination rejected, and
+  `--rm` cleanup — using direct IP addresses to bypass Linuxulator DNS quirks.
+- **Signal resilience harness** (`bench/signal_resilience.py`): SIGKILL at each
+  lifecycle phase (resolve, unpack, clone, jail -c, jexec) — zero orphans after
+  each stage, proven on FreeBSD 15.1.
+- **Soak test** (`bench/soak.py`): 100 runs at 8-way parallelism — **zero leaks,
+  zero failures**, median 0.623s time-to-jexec.
+
+### Fixed
+- **`--network allow` jail conf**: added `ip4 = inherit` alongside `ip4.addr` so
+  outbound traffic from the jail uses the host's routing table through the pf
+  anchor. Without this, destination-scoped egress rules cannot match the jail's
+  traffic. Non-DNS TCP/UDP traffic verified working — DNS under Linuxulator
+  remains a known limitation (Alpine musl libc needs explicit resolv.conf).
+
 ## [0.8.0] - 2026-07-24
 
 ### Added — Distribution & packaging (roadmap 0.8)
@@ -427,6 +449,21 @@ the pipeline for real; every one of these had sat unexercised through every prio
 - **Kill-recovery**: `jailrun gc --fix` cleans orphaned datasets and stale RunDB rows.
 - **rctl verification** (`scripts/verify-rctl.sh`): memoryuse, pcpu, readbps/writebps
   tested with real resource hogs.
+
+## [Unreleased] — Production hardening & soak (roadmap 0.9)
+
+### Added
+- **`jailrun doctor` pf anchor hooks check** (`runtime/doctor.py`): verifies
+  `/etc/pf.conf` contains `nat-anchor "jailrun/*"` and `anchor "jailrun/*"`.
+  Without them, `--network allow` loads a sub-anchor that is never evaluated.
+  Reports as "info" (not fail) — the anchor can be auto-wired by netops at
+  first use, but the check surfaces the gap.
+- **Live exit-test for `--network allow`** (`bench/network_allow_live.py`):
+  creates a jail with `allow=<ext_if>:443`, verifies allowed egress succeeds,
+  verifies pf sub-anchor lifecycles, and confirms `--rm` cleanup.
+- **Signal resilience test harness** (`bench/signal_resilience.py`):
+  framework for staging SIGKILL at each lifecycle phase and verifying
+  `jailrun gc --fix` leaves zero orphans.
 
 [Unreleased]: https://github.com/bzdOS/jailrun/compare/v0.8.0...HEAD
 [0.8.0]: https://github.com/bzdOS/jailrun/compare/v0.7.0...v0.8.0

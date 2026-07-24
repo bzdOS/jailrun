@@ -36,4 +36,4 @@ packages = ["runtime", "probe", "store", "bakery", "providers"]
 providers = ["*.json"]
 
 [tool.setuptools.data-files]
-man/man1 = ["man/man1/jailrun.1"]
+"man/man1" = ["man/man1/jailrun.1"]

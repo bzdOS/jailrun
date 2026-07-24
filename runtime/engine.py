@@ -498,11 +498,14 @@ def _build_jail_conf(
     if network == "none":
         lines += ["    ip4 = disable;", "    ip6 = disable;"]
     elif network == "allow":
-        # Destination-scoped (0.4, A2 shared-stack): the jail gets ONLY its alias
-        # IP; pf tags+NATs its egress to the allowed destinations (engine.py
-        # applies the sub-anchor before jail -c). ip6 stays disabled so traffic
-        # can't sneak out v6 around the v4 filter.
+        # Destination-scoped (0.4, A2 shared-stack): the jail gets its alias
+        # IP plus ip4=inherit so the routing table (including the default route)
+        # is visible — the jail needs to send packets through the host stack for
+        # the pf NAT/anchor to work. pf tags+NATs its egress to the allowed
+        # destinations (engine.py applies the sub-anchor before jail -c). ip6
+        # stays disabled so traffic can't sneak out v6 around the v4 filter.
         lines.append(f"    ip4.addr = {ip4_addr!r};")
+        lines.append("    ip4 = inherit;")
         lines.append("    ip6 = disable;")
     else:
         lines += ["    ip4 = inherit;", "    ip6 = inherit;"]

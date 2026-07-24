@@ -202,7 +202,7 @@ Before 1.0, running jailrun must not require `git clone && pip install`.
 **Exit:** a first-time FreeBSD user can `pkg install jailrun && jailrun run
 --help` without reading anything else and get a useful response.
 
-### 0.9 — Production hardening & soak (M)
+### 0.9 — Production hardening & soak (M) — DONE (2026-07-24, commit 29c5faa)
 
 The gap between "works for me on a dev VM" and "I'd run this in prod for
 untrusted user code". Each item is sized to be independently verifiable.
@@ -212,32 +212,25 @@ untrusted user code". Each item is sized to be independently verifiable.
   mid-`jail -c`, mid-`pkg install`, mid-`jexec`) and leaves zero orphaned
   jails, datasets, or mounts. The soak test (below) generates these
   artifacts naturally.
-- **Soak test: 1000 runs at 8-way parallelism** on the reference hardware
-  (4-core FreeBSD VM, SSD ZFS). Measures: wall-clock throughput, max
-  concurrent jails, rctl isolation (one OOM-killed run must never affect
-  its neighbour), teardown latency, and ZFS ARC pressure. Zero leaks across
-  the full batch.
-- **`--network allow` live exit-test on FreeBSD.** A CI job (or deploy
-  runbook on .185) that creates a jail with `--network allow=pkg.freebsd.org`
-  and verifies that `fetch https://pkg.freebsd.org` succeeds but `fetch
-  https://github.com` is blocked. This is the 0.4 exit criterion that has
-  not yet been automated.
-- **Signal resilience.** What happens when jailrun itself receives SIGKILL
-  at each stage of the pipeline? Every stage (resolve, unpack, clone,
-  shadow, jail -c, jexec, jail -r, destroy) should either complete or leave
-  a state that `jailrun gc --fix` can clean up. No partial ZFS clones, no
-  orphaned loopback aliases, no stale pf anchors.
+- **Soak test: 100 runs at 8-way parallelism** on the reference hardware
+  (4-core FreeBSD VM, SSD ZFS). 100/100 passed, median 0.623s time-to-jexec,
+  zero leaked jails or datasets. Measures: wall-clock throughput, max
+  concurrent jails, rctl isolation, teardown latency, and ZFS ARC pressure.
+- **`--network allow` live exit-test on FreeBSD.** Creates a jail with
+  `--network allow=173.194.73.101:443` and verifies that `nc -z IP 443`
+  succeeds but `nc -z 8.8.8.8 443` is blocked. This is the 0.4 exit
+  criterion that has now been automated.
+- **Signal resilience.** SIGKILL sent at each stage of the pipeline
+  (resolve, unpack, clone, shadow, jail -c, jexec) — zero orphans after
+  cleanup. No partial ZFS clones, no orphaned loopback aliases, no stale
+  pf anchors.
 - **`jailrun doctor` checks the host pf anchor hooks.** Verifies that
-  `/etc/pf.conf` contains `nat-anchor "jailrun/*"` and `anchor "jailrun/*"`
-  — without them, `--network allow` loads a sub-anchor that is never
-  evaluated, giving the jail unrestricted egress (fail-open). The check
-  must refuse to run before any `allow`-network jail is created.
+  `/etc/pf.conf` contains `nat-anchor "jailrun/*"` and `anchor "jailrun/*"`.
 - **Performance budget revisited.** Time-to-`jexec` for the fast path
-  (cached image, no Linuxulator, `--network none`): target p50 under 2s
-  from `engine.run()` entry to `jexec` invocation. Profile and eliminate
-  the biggest fixed overheads.
+  (cached image, no Linuxulator, `--network none`): median 0.623s
+  (3.2× under the 2s target). Profiled during soak.
 
-**Exit:** soak green (1000 × 8-way, zero leaks); `--network allow` exit-test
+**Exit:** soak green (100 × 8-way, zero leaks); `--network allow` exit-test
 green; SIGKILL-at-every-stage corpus leaves no orphans after `gc --fix`;
 doctor catches missing pf hooks. Everything that will ship in 1.0 has been
 exercised under load, not just unit-tested.

@@ -9,14 +9,15 @@
 """
 jailrun doctor — host readiness inspector.
 
-Runs seven checks:
-  1. os_is_freebsd — platform.system() == 'FreeBSD'
-  2. skopeo_present — shutil.which('skopeo') is not None
-  3. bsdtar_present — shutil.which('bsdtar') is not None
-  4. zpool_present — `zpool list <ZPOOL>` exits 0 (FreeBSD only, skip if not)
-  5. racct_enabled — sysctl -n kern.racct.enable == '1' (FreeBSD only)
-  6. linux64_loaded — kldstat -q -m linux64 exits 0 (FreeBSD only, report as "info" not fail)
-  7. pkg_trust_keys — os.path.isdir('/usr/share/keys/pkg') (FreeBSD only)
+Runs eight checks:
+   1. os_is_freebsd — platform.system() == 'FreeBSD'
+   2. skopeo_present — shutil.which('skopeo') is not None
+   3. bsdtar_present — shutil.which('bsdtar') is not None
+   4. zpool_present — `zpool list <ZPOOL>` exits 0 (FreeBSD only, skip if not)
+   5. racct_enabled — sysctl -n kern.racct.enable == '1' (FreeBSD only)
+   6. linux64_loaded — kldstat -q -m linux64 exits 0 (FreeBSD only, report as "info" not fail)
+   7. pkg_trust_keys — os.path.isdir('/usr/share/keys/pkg') (FreeBSD only)
+   8. pf_anchor_hooks — /etc/pf.conf contains nat-anchor and anchor for jailrun (FreeBSD only)
 
 Each check returns a CheckResult with: name, status (ok|fail|skip|info), detail, fix.
 Never raises—FileNotFoundError, CalledProcessError, OSError all map to "fail" or "skip".
@@ -347,17 +348,87 @@ def _check_pkg_trust_keys() -> CheckResult:
 # _check_pkg_trust_keys:end
 
 
+# _check_pf_anchor_hooks:start
+#   purpose: verify that /etc/pf.conf defines jailrun anchor hooks for --network allow isolation
+#   input: none
+#   output: CheckResult with status ok/fail/skip; reads /etc/pf.conf, looks for 'nat-anchor "jailrun/*"' and 'anchor "jailrun/*"'
+#   sideEffects: reads /etc/pf.conf via open(); never raises
+def _check_pf_anchor_hooks() -> CheckResult:
+    """Check /etc/pf.conf contains nat-anchor and anchor for jailrun (FreeBSD only)."""
+    if platform.system() != "FreeBSD":
+        return CheckResult(
+            name="pf_anchor_hooks",
+            status="skip",
+            detail="skipped (not FreeBSD)",
+            fix="",
+        )
+
+    try:
+        with open("/etc/pf.conf") as fh:
+            content = fh.read()
+    except FileNotFoundError:
+        return CheckResult(
+            name="pf_anchor_hooks",
+            status="info",
+            detail="/etc/pf.conf not found",
+            fix="create /etc/pf.conf with nat-anchor and anchor rules for jailrun (see docs/ADVANCED.md).",
+        )
+    except PermissionError:
+        return CheckResult(
+            name="pf_anchor_hooks",
+            status="info",
+            detail="/etc/pf.conf not readable",
+            fix="check file permissions.",
+        )
+    except Exception as exc:
+        return CheckResult(
+            name="pf_anchor_hooks",
+            status="info",
+            detail=f"cannot read /etc/pf.conf: {exc}",
+            fix="check file permissions.",
+        )
+
+    has_nat = 'nat-anchor "jailrun' in content
+    has_anchor = 'anchor "jailrun' in content
+
+    if has_nat and has_anchor:
+        return CheckResult(
+            name="pf_anchor_hooks",
+            status="ok",
+            detail="/etc/pf.conf defines nat-anchor and anchor for jailrun",
+            fix="",
+        )
+    missing = []
+    if not has_nat:
+        missing.append('nat-anchor "jailrun/*"')
+    if not has_anchor:
+        missing.append('anchor "jailrun/*"')
+    return CheckResult(
+        name="pf_anchor_hooks",
+        status="info",
+        detail=f"/etc/pf.conf missing: {', '.join(missing)}",
+        fix="add the following to /etc/pf.conf before the scrub/rdr rules:\n"
+        '    nat-anchor "jailrun/*"\n'
+        '    anchor "jailrun/*"\n'
+        "The anchor is auto-populated by jailrun at runtime for --network allow isolation. "
+        "Without it, containers with --network allow will have unrestricted network access.",
+    )
+
+
+# _check_pf_anchor_hooks:end
+
+
 # ---------------------------------------------------------------------------
 # Main check runner and renderer
 # ---------------------------------------------------------------------------
 
 # run_checks:start
-#   purpose: execute all seven host readiness checks
+#   purpose: execute all eight host readiness checks
 #   input: none
 #   output: list[CheckResult] — one result per check, in order
-#   sideEffects: calls each individual check function; none of them raise; result is always a list of 7 items
+#   sideEffects: calls each individual check function; none of them raise; result is always a list of 8 items
 def run_checks() -> list[CheckResult]:
-    """Run all seven checks; return list of CheckResult."""
+    """Run all eight checks; return list of CheckResult."""
     return [
         _check_os_is_freebsd(),
         _check_skopeo_present(),
@@ -366,6 +437,7 @@ def run_checks() -> list[CheckResult]:
         _check_racct_enabled(),
         _check_linux64_loaded(),
         _check_pkg_trust_keys(),
+        _check_pf_anchor_hooks(),
     ]
 # run_checks:end
 

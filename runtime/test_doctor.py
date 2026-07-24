@@ -35,6 +35,7 @@ RESULTS_ALL_OK = [
     CheckResult(name="racct_enabled", status="ok", detail="kern.racct.enable=1", fix=""),
     CheckResult(name="linux64_loaded", status="ok", detail="linux64 module is loaded", fix=""),
     CheckResult(name="pkg_trust_keys", status="ok", detail="/usr/share/keys/pkg exists", fix=""),
+    CheckResult(name="pf_anchor_hooks", status="ok", detail="/etc/pf.conf defines nat-anchor and anchor for jailrun", fix=""),
 ]
 
 # Mock a Linux host (skips FreeBSD-specific checks)
@@ -46,6 +47,7 @@ RESULTS_LINUX_HOST = [
     CheckResult(name="racct_enabled", status="skip", detail="skipped (not FreeBSD)", fix=""),
     CheckResult(name="linux64_loaded", status="skip", detail="skipped (not FreeBSD)", fix=""),
     CheckResult(name="pkg_trust_keys", status="skip", detail="skipped (not FreeBSD)", fix=""),
+    CheckResult(name="pf_anchor_hooks", status="skip", detail="skipped (not FreeBSD)", fix=""),
 ]
 
 # Mock missing zpool
@@ -57,6 +59,7 @@ RESULTS_NO_ZPOOL = [
     CheckResult(name="racct_enabled", status="ok", detail="kern.racct.enable=1", fix=""),
     CheckResult(name="linux64_loaded", status="info", detail="linux64 module is not loaded", fix="only needed for the Tier-2 Linuxulator fallback; load with: kldload linux64 (or provision-freebsd.sh --tier2). Not required for the native path."),
     CheckResult(name="pkg_trust_keys", status="ok", detail="/usr/share/keys/pkg exists", fix=""),
+    CheckResult(name="pf_anchor_hooks", status="ok", detail="/etc/pf.conf defines nat-anchor and anchor for jailrun", fix=""),
 ]
 
 # Mock with some skipped (non-FreeBSD) and one info (linux64)
@@ -68,6 +71,7 @@ RESULTS_MIXED_STATUS = [
     CheckResult(name="racct_enabled", status="info", detail="some advisory info", fix="this is informational only"),
     CheckResult(name="linux64_loaded", status="info", detail="another advisory", fix="also just info"),
     CheckResult(name="pkg_trust_keys", status="ok", detail="/usr/share/keys/pkg exists", fix=""),
+    CheckResult(name="pf_anchor_hooks", status="info", detail="/etc/pf.conf missing: nat-anchor and anchor", fix="add the following to /etc/pf.conf"),
 ]
 
 
