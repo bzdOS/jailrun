@@ -34,6 +34,7 @@ if _ROOT not in sys.path:
 
 from providers import (  # noqa: E402
     MULTI_BINARY_PKGS,
+    MULTI_BINARY_SUFFIX,
     PKG_ARTIFACTS,
     PORT_ARTIFACTS,
     PROVIDER_MAP,
@@ -61,13 +62,15 @@ EXPECTED_PROVIDER_MAP: dict[str, str] = {
     "gmake":          "pkg:gmake",
     "meson":          "pkg:meson",
     "bazel":          "pkg:bazel",
-    "scons":          "pkg:scons",
+    "scons":          "pkg:scons-py312",   # corrected 2026-07-24: real pkg is scons-py312 (no bare "scons" pkg)
 
-    # Compilers / toolchains
-    "gcc":            "pkg:gcc",
-    "g++":            "pkg:gcc",
-    "clang":          "pkg:llvm",
-    "clang++":        "pkg:llvm",
+    # Compilers / toolchains. Corrected 2026-07-24 (0.3 backfill): pkg:gcc and
+    # pkg:llvm are tiny repo stubs (20B / 4.25KiB) that install NOTHING — the
+    # real, binary-providing packages are the versioned gcc16 / llvm22.
+    "gcc":            "pkg:gcc16",
+    "g++":            "pkg:gcc16",
+    "clang":          "pkg:llvm22",
+    "clang++":        "pkg:llvm22",
     "ld":             "pkg:binutils",
     "ar":             "pkg:binutils",
     "objcopy":        "pkg:binutils",
@@ -83,7 +86,10 @@ EXPECTED_PROVIDER_MAP: dict[str, str] = {
     "xtensa-esp32s2-elf-gcc":  "port:devel/xtensa-esp-elf",
     "xtensa-esp32s3-elf-gcc":  "port:devel/xtensa-esp-elf",
     "xtensa-lx106-elf-gcc":    "port:devel/xtensa-esp-elf",
-    "riscv32-esp-elf-gcc":     "port:devel/riscv32-esp-elf",
+    # "riscv32-esp-elf-gcc" REMOVED 2026-07-24: port:devel/riscv32-esp-elf has
+    # no real FreeBSD port (bakery's own RECIPE_REGISTRY flagged it a stub) —
+    # an unconfirmable mapping shouldn't ship; probe now falls back to
+    # linuxulator for riscv32, which is honest.
 
     # Interpreters / runtimes
     "node":           "pkg:node",
@@ -119,8 +125,12 @@ EXPECTED_PROVIDER_MAP: dict[str, str] = {
     "pip":            "pkg:py311-pip",
     "pip3":           "pkg:py311-pip",
 
-    # esphome ecosystem
-    "esphome":        "pkg:py311-esphome",
+    # "esphome" REMOVED 2026-07-24: there is NO FreeBSD package for ESPHome of
+    # any name (pkg search esphome is empty) — it is pip-installed, not a pkg.
+    # pkg:py311-esphome was a false promise that could never confirm at L1;
+    # a Linux image's esphome binary now falls back to linuxulator. The ESP32
+    # firmware COMPILE itself uses the native xtensa toolchain (mapped above),
+    # which is the load-bearing native path.
 }
 
 EXPECTED_PKG_ARTIFACTS: dict[str, str] = {
@@ -148,6 +158,24 @@ EXPECTED_PKG_ARTIFACTS: dict[str, str] = {
     "gperf":          "/usr/local/bin/gperf",
     "zip":            "/usr/local/bin/zip",
     "m4":             "/usr/local/bin/gm4",
+    # Added 2026-07-24 (0.3 backfill) — paths confirmed present on a real
+    # FreeBSD 15.1 host (providers/verification.json). gcc16/llvm22 are NOT
+    # here: they are multi-binary versioned pkgs resolved via basename+suffix
+    # (see MULTI_BINARY_PKGS / MULTI_BINARY_SUFFIX), not a single table path.
+    "python310":      "/usr/local/bin/python3.10",
+    "gtar":           "/usr/local/bin/gtar",
+    "dash":           "/usr/local/bin/dash",
+    "meson":          "/usr/local/bin/meson",
+    "scons-py312":    "/usr/local/bin/scons",
+    "zsh":            "/usr/local/bin/zsh",
+    "bzip2":          "/usr/local/bin/bzip2",
+    "gzip":           "/usr/local/bin/gzip",
+    "unzip":          "/usr/local/bin/unzip",
+    "openssl":        "/usr/local/bin/openssl",
+    "bazel":          "/usr/local/bin/bazel",
+    "php83":          "/usr/local/bin/php",
+    "py311-pip":      "/usr/local/bin/pip",
+    "openjdk21":      "/usr/local/openjdk21/bin/java",
 }
 
 EXPECTED_PORT_ARTIFACTS: dict[str, str] = {
@@ -158,7 +186,10 @@ EXPECTED_PORT_ARTIFACTS: dict[str, str] = {
     ),
 }
 
-EXPECTED_MULTI_BINARY_PKGS: frozenset[str] = frozenset({"binutils"})
+# gcc16/llvm22 join binutils (both install many binaries); their versioned
+# binary-name suffix (gcc16 -> gcc16/g++16, llvm22 -> clang22/clang++22) lives
+# in providers/multi-binary-suffix.json. Corrected 2026-07-24 (0.3 backfill).
+EXPECTED_MULTI_BINARY_PKGS: frozenset[str] = frozenset({"binutils", "gcc16", "llvm22"})
 
 
 # CONTRACT: providers.PROVIDER_MAP loaded from providers/provider-map.json is byte-for-byte
@@ -166,7 +197,7 @@ EXPECTED_MULTI_BINARY_PKGS: frozenset[str] = frozenset({"binutils"})
 #           in probe/probe.py.
 def test_provider_map_round_trips_exactly():
     assert isinstance(PROVIDER_MAP, dict)
-    assert len(PROVIDER_MAP) == 55 == len(EXPECTED_PROVIDER_MAP)
+    assert len(PROVIDER_MAP) == 53 == len(EXPECTED_PROVIDER_MAP)
     assert PROVIDER_MAP == EXPECTED_PROVIDER_MAP
 
 
@@ -174,7 +205,7 @@ def test_provider_map_round_trips_exactly():
 #           to bakery/bakery.py's former PKG_ARTIFACTS.
 def test_pkg_artifacts_round_trips_exactly():
     assert isinstance(PKG_ARTIFACTS, dict)
-    assert len(PKG_ARTIFACTS) == 24 == len(EXPECTED_PKG_ARTIFACTS)
+    assert len(PKG_ARTIFACTS) == 38 == len(EXPECTED_PKG_ARTIFACTS)
     assert PKG_ARTIFACTS == EXPECTED_PKG_ARTIFACTS
 
 
@@ -193,6 +224,15 @@ def test_port_artifacts_round_trips_exactly():
 def test_multi_binary_pkgs_round_trips_exactly():
     assert isinstance(MULTI_BINARY_PKGS, frozenset)
     assert MULTI_BINARY_PKGS == EXPECTED_MULTI_BINARY_PKGS
+
+
+# CONTRACT: providers.MULTI_BINARY_SUFFIX (multi-binary-suffix.json) lists, per
+#           versioned multi-binary pkg, the suffix appended to each installed
+#           binary's basename. Every key MUST already be in MULTI_BINARY_PKGS.
+def test_multi_binary_suffix_round_trips_exactly():
+    assert isinstance(MULTI_BINARY_SUFFIX, dict)
+    assert MULTI_BINARY_SUFFIX == {"gcc16": "16", "llvm22": "22"}
+    assert set(MULTI_BINARY_SUFFIX).issubset(MULTI_BINARY_PKGS)
 
 
 # CONTRACT: probe.py and bakery.py must import (re-export) the SAME objects providers
@@ -220,6 +260,7 @@ def test_probe_and_bakery_reexport_the_same_objects():
 
     from bakery.bakery import (
         MULTI_BINARY_PKGS as bakery_multi_binary_pkgs,
+        MULTI_BINARY_SUFFIX as bakery_multi_binary_suffix,
         PKG_ARTIFACTS as bakery_pkg_artifacts,
         PORT_ARTIFACTS as bakery_port_artifacts,
     )
@@ -228,6 +269,7 @@ def test_probe_and_bakery_reexport_the_same_objects():
     assert bakery_pkg_artifacts is PKG_ARTIFACTS
     assert bakery_port_artifacts is PORT_ARTIFACTS
     assert bakery_multi_binary_pkgs is MULTI_BINARY_PKGS
+    assert bakery_multi_binary_suffix is MULTI_BINARY_SUFFIX
 
 
 # CONTRACT: the data files themselves live next to providers/__init__.py and are
@@ -240,6 +282,7 @@ def test_data_files_exist_next_to_loader_module():
         "pkg-artifacts.json",
         "port-artifacts.json",
         "multi-binary-pkgs.json",
+        "multi-binary-suffix.json",
         "registry.schema.json",
     ):
         assert (data_dir / name).is_file(), f"missing providers/{name}"
@@ -250,6 +293,7 @@ TESTS = [
     test_pkg_artifacts_round_trips_exactly,
     test_port_artifacts_round_trips_exactly,
     test_multi_binary_pkgs_round_trips_exactly,
+    test_multi_binary_suffix_round_trips_exactly,
     test_probe_and_bakery_reexport_the_same_objects,
     test_data_files_exist_next_to_loader_module,
 ]

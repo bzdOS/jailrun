@@ -38,12 +38,17 @@ sys.path.insert(0, _ROOT)
 _PROVIDERS_DIR = Path(_ROOT, "providers")
 
 # Maps each data file to the $defs key in registry.schema.json that describes its shape.
+# verification.json is GENERATED (by providers/backfill.py on a FreeBSD host), so it
+# is validated only WHEN PRESENT — a clean tree without a freshly-run backfill must
+# still pass CI. The other four are hand-maintained and always required.
 FILE_TO_SCHEMA_DEF = {
     "provider-map.json": "provider_map",
     "pkg-artifacts.json": "pkg_artifacts",
     "port-artifacts.json": "port_artifacts",
     "multi-binary-pkgs.json": "multi_binary_pkgs",
+    "multi-binary-suffix.json": "multi_binary_suffix",
     "coreutils-flavor.json": "coreutils_flavor",
+    "verification.json": "verification",
 }
 
 
@@ -54,6 +59,10 @@ def main() -> None:
     # START_VALIDATE_EACH_DATA_FILE
     for filename, def_name in FILE_TO_SCHEMA_DEF.items():
         data_path = _PROVIDERS_DIR / filename
+        if filename == "verification.json" and not data_path.exists():
+            # GENERATED file — absent is fine on a tree that hasn't run a backfill.
+            print(f"skip: providers/{filename} not generated yet (run `python3 -m providers.backfill` on FreeBSD)")
+            continue
         data = json.loads(data_path.read_text())
         jsonschema.validate(data, defs[def_name])
         print(f"OK: providers/{filename} validates against $defs/{def_name}")
@@ -65,6 +74,7 @@ def main() -> None:
     from providers import (
         COREUTILS_FLAVOR,
         MULTI_BINARY_PKGS,
+        MULTI_BINARY_SUFFIX,
         PKG_ARTIFACTS,
         PORT_ARTIFACTS,
         PROVIDER_MAP,
@@ -74,15 +84,39 @@ def main() -> None:
     assert isinstance(PKG_ARTIFACTS, dict) and len(PKG_ARTIFACTS) > 0, "PKG_ARTIFACTS is empty or wrong type"
     assert isinstance(PORT_ARTIFACTS, dict) and len(PORT_ARTIFACTS) > 0, "PORT_ARTIFACTS is empty or wrong type"
     assert isinstance(MULTI_BINARY_PKGS, frozenset), "MULTI_BINARY_PKGS must be a frozenset"
+    assert isinstance(MULTI_BINARY_SUFFIX, dict), "MULTI_BINARY_SUFFIX must be a dict"
+    # Every suffix key must be an already-declared multi-binary pkg (suffix only
+    # refines an existing multi-binary pkg, never declares a new one).
+    _suffix_orphans = [k for k in MULTI_BINARY_SUFFIX if k not in MULTI_BINARY_PKGS]
+    assert not _suffix_orphans, f"MULTI_BINARY_SUFFIX keys not in MULTI_BINARY_PKGS: {_suffix_orphans}"
     assert isinstance(COREUTILS_FLAVOR, dict) and len(COREUTILS_FLAVOR) > 0, "COREUTILS_FLAVOR is empty or wrong type"
     # Every coreutils-flavor.json key must point at a binary that actually exists in
     # provider-map.json — this file only LABELS existing mappings, it never invents new ones.
     orphans = [k for k in COREUTILS_FLAVOR if k not in PROVIDER_MAP]
     assert not orphans, f"COREUTILS_FLAVOR has keys not present in PROVIDER_MAP: {orphans}"
+    # verification.json (when present) is keyed by the same basenames as provider-map.json
+    # and its per-entry provider must match — a drift here means the backfill and the
+    # shipped registry disagree, which is exactly what this CI guard exists to catch.
+    _verification_path = _PROVIDERS_DIR / "verification.json"
+    if _verification_path.exists():
+        _verification = json.loads(_verification_path.read_text())
+        _v_entries = _verification.get("entries", {})
+        _v_orphans = [k for k in _v_entries if k not in PROVIDER_MAP]
+        assert not _v_orphans, f"verification.json has keys not in PROVIDER_MAP: {_v_orphans}"
+        _v_drift = [
+            k for k, v in _v_entries.items()
+            if v.get("provider") != PROVIDER_MAP[k]
+        ]
+        assert not _v_drift, (
+            "verification.json provider strings diverge from provider-map.json: "
+            + ", ".join(f"{k}={_v_entries[k]['provider']}!={PROVIDER_MAP[k]}" for k in _v_drift)
+        )
+        print(f"OK: providers/verification.json consistent with PROVIDER_MAP ({len(_v_entries)} entries)")
     print(
         "OK: providers loader exposes non-empty PROVIDER_MAP "
         f"({len(PROVIDER_MAP)}), PKG_ARTIFACTS ({len(PKG_ARTIFACTS)}), "
         f"PORT_ARTIFACTS ({len(PORT_ARTIFACTS)}), MULTI_BINARY_PKGS ({len(MULTI_BINARY_PKGS)}), "
+        f"MULTI_BINARY_SUFFIX ({len(MULTI_BINARY_SUFFIX)}), "
         f"COREUTILS_FLAVOR ({len(COREUTILS_FLAVOR)})"
     )
     # END_SANITY_CHECK_LOADER

@@ -73,6 +73,20 @@
         }
       }
     },
+    "multi_binary_suffix": {
+      "title": "multi-binary-suffix.json",
+      "description": "Per-multi-binary-pkg version suffix appended to each installed binary's basename when resolving its artifact path. Some ports install ONLY versioned binaries with no unversioned symlink: gcc16 -> /usr/local/bin/gcc16, g++16; llvm22 -> clang22, clang++22. A multi-binary pkg absent from this map gets \"\" (its binaries are unversioned, e.g. binutils -> ar/ld/nm). Every key here MUST already be listed in multi-binary-pkgs.json's packages (it only refines an existing multi-binary pkg).",
+      "type": "object",
+      "required": ["schema_version", "suffixes"],
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": { "type": "integer", "minimum": 1 },
+        "suffixes": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
+      }
+    },
     "coreutils_flavor": {
       "title": "coreutils-flavor.json",
       "description": "Descriptive metadata about EXISTING provider-map.json entries for coreutils-class binaries (classic Unix text/file utilities where GNU and BSD implementations have historically-known flag/behavior differences, per ROADMAP.md's 0.3 'Substitution policy per entry'). key: a binary basename that MUST already be a key in provider-map.json's `providers` object. value: which userland flavor provider-map.json's CURRENT mapping for that binary actually resolves to today (gnu = the provider string is a GNU-flavored port/pkg, e.g. pkg:gtar; bsd = base-system or a non-GNU port). This file does NOT add or change any binary->provider mapping — it only labels mappings that already exist. See docs/GNU-VS-BSD-POLICY.md.",
@@ -89,6 +103,52 @@
           }
         }
       }
+    },
+    "verification": {
+      "title": "verification.json",
+      "description": "GENERATED evidence record (roadmap 0.3 backfill — providers/backfill.py) that, for every provider-map.json entry, records whether the resolved FreeBSD artifact path has been confirmed present on a real FreeBSD host (verification level + how/when/where it was checked). Keyed by the SAME Linux binary basename as provider-map.json. Unlike the hand-maintained data files, this one is produced by `python3 -m providers.backfill` on (or proxied from) a FreeBSD host and re-committed; the CI validator checks it only when present. verification follows the ladder guessed(L0)/exists(L1)/runs(L2)/behaves(L3)/proven(L4); the backfill tool emits only guessed|exists today (L2-L4 come from the agent verification harness).",
+      "type": "object",
+      "required": ["schema_version", "generated", "entries"],
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": { "type": "integer", "minimum": 1 },
+        "generated": {
+          "type": "object",
+          "description": "Host context that makes the evidence reproducible.",
+          "required": ["host", "freebsd_version", "checked_at", "method"],
+          "additionalProperties": false,
+          "properties": {
+            "host": { "type": "string" },
+            "freebsd_version": { "type": "string" },
+            "checked_at": { "type": "string" },
+            "method": { "type": "string" }
+          }
+        },
+        "entries": {
+          "type": "object",
+          "description": "key: Linux binary basename (a provider-map.json key). value: its resolved artifact + verification evidence.",
+          "additionalProperties": {
+            "type": "object",
+            "required": ["provider", "artifact_path", "verification", "evidence"],
+            "additionalProperties": false,
+            "properties": {
+              "provider": { "type": "string", "pattern": "^(pkg|port|build):.+$" },
+              "artifact_path": { "type": ["string", "null"] },
+              "verification": { "enum": ["guessed", "exists", "runs", "behaves", "proven"] },
+              "evidence": {
+                "type": "object",
+                "required": ["method", "result", "source"],
+                "additionalProperties": false,
+                "properties": {
+                  "method": { "type": "string" },
+                  "result": { "enum": ["present", "absent", "unresolved"] },
+                  "source": { "type": "string" }
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "anyOf": [
@@ -96,6 +156,8 @@
     { "$ref": "#/$defs/pkg_artifacts" },
     { "$ref": "#/$defs/port_artifacts" },
     { "$ref": "#/$defs/multi_binary_pkgs" },
-    { "$ref": "#/$defs/coreutils_flavor" }
+    { "$ref": "#/$defs/multi_binary_suffix" },
+    { "$ref": "#/$defs/coreutils_flavor" },
+    { "$ref": "#/$defs/verification" }
   ]
 }

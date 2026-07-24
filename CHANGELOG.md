@@ -6,6 +6,51 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); this project adh
 
 ## [Unreleased]
 
+### Added (2026-07-24) — roadmap 0.3 backfill (registry driven to 0 L0)
+- **Registry verification backfill (`providers/backfill.py`).** The standalone
+  tool roadmap 0.3 calls for: walks every `provider-map.json` entry, resolves
+  each Linux binary's FreeBSD artifact path reusing bakery's exact resolution
+  (PKG_ARTIFACTS / resolve_pkg / PORT_ARTIFACTS / MULTI_BINARY_PKGS /
+  MULTI_BINARY_SUFFIX), checks whether that path exists on the host, and
+  persists per-binary verification level + an evidence record (host, FreeBSD
+  version, when, how) into a new `providers/verification.json`. Until now
+  verification level lived only inside a per-image manifest at build time
+  (probe stamps L0 "guessed", bakery bumps to L1 "exists"); nothing walked the
+  registry itself and froze the result into data. The host-existence check is
+  injected, so the module is fully unit-testable on Linux with a fake checker;
+  L1 uses bakery's own `Path.exists()` definition verbatim and the tool never
+  invents L2–L4 (runs/behaves/proven — those remain the agent verification
+  harness's job).
+- **`providers/verification.json`** — generated evidence from a real FreeBSD
+  15.1 host: **all 53 shipped entries confirmed at L1 (exists), 0 at L0.**
+  Validated against a new `$defs/verification` in `registry.schema.json`; the
+  CI validator checks it when present and enforces consistency with
+  `provider-map.json` (every key present, every provider string matching).
+- **Registry correctness fixes the backfill surfaced (its intended function) —
+  several shipped mappings were false promises that could never confirm:**
+  - `clang`/`clang++`: `pkg:llvm` is a 4.25 KiB repo stub that installs
+    nothing → corrected to `pkg:llvm22`.
+  - `gcc`/`g++`: `pkg:gcc` is a 20-byte stub → corrected to `pkg:gcc16`.
+  - `scons`: no bare `scons` package exists → corrected to `pkg:scons-py312`.
+  - `esphome`: **no FreeBSD package of any name exists** (ESPHome is
+    pip-installed, not a pkg) → mapping removed; a Linux image's esphome
+    binary now falls back to linuxulator. The ESP32 firmware compile itself
+    uses the native xtensa toolchain (still mapped), which is the load-bearing
+    native path.
+  - `riscv32-esp-elf-gcc`: `port:devel/riscv32-esp-elf` has no real FreeBSD
+    port → mapping removed; falls back to linuxulator.
+  - Wrong artifact paths where the package installs a differently-named binary:
+    `php83`→`/usr/local/bin/php` (not `php83`), `py311-pip`→`/usr/local/bin/pip`,
+    `python310`→`/usr/local/bin/python3.10`, `openjdk21`→`/usr/local/openjdk21/bin/java`.
+- **Versioned multi-binary packages (`providers/multi-binary-suffix.json`).**
+  `gcc16` and `llvm22` install ONLY versioned binaries (`gcc16`/`g++16`,
+  `clang22`/`clang++22`) with no unversioned symlink, so the existing
+  multi-binary rule (resolve to `/usr/local/bin/<basename>`) pointed at paths
+  that don't exist. New per-package version-suffix map (e.g. `gcc16`→`"16"`,
+  `llvm22`→`"22"`; `binutils` stays unsuffixed) is applied in both
+  `bakery.fill_artifact_paths()` and the backfill resolver, loaded through the
+  `providers` package, schema-validated, and CI-guarded.
+
 ### Fixed (2026-07-23)
 - **`_merge_tree` special-file handling — contract fix (non-security).** A non-regular,
   non-symlink, non-directory OCI-layer entry (a FIFO, an AF_UNIX socket, or — as root — a

@@ -89,16 +89,16 @@ def test_loader_exposes_coreutils_flavor_correctly():
     assert COREUTILS_FLAVOR.get("tar") == "gnu"
 
 
-# CONTRACT (the most important one): adding coreutils-flavor.json, its schema entry,
-# and its loader constant must NOT have changed provider-map.json's existing
-# binary->provider data, PROVIDER_MAP's type, or its contents in any way. This is the
-# round-trip proof, reusing the SAME fixture providers/test_registry_roundtrip.py pins
-# (EXPECTED_PROVIDER_MAP, pasted verbatim from the pre-extraction probe.py literal) —
-# not a re-derived or trimmed copy — so this test can only pass if PROVIDER_MAP is
-# byte-for-byte identical to what it was before this task's changes.
-def test_provider_map_unchanged_by_flavor_work():
+# CONTRACT: provider-map.json's binary->provider data matches the pinned fixture
+# (EXPECTED_PROVIDER_MAP, reused from providers/test_registry_roundtrip.py). This
+# originally proved the coreutils-flavor work left provider-map.json UNCHANGED;
+# provider-map.json has since been intentionally corrected (2026-07-24, 0.3 backfill:
+# pkg:gcc/llvm stubs -> real gcc16/llvm22, scons -> scons-py312, riscv32 port
+# removed). It now re-pins the current, corrected map from a second file — catching
+# any accidental drift, on top of test_registry_roundtrip's own round-trip.
+def test_provider_map_matches_pinned_fixture():
     assert isinstance(PROVIDER_MAP, dict)
-    assert len(PROVIDER_MAP) == 55 == len(EXPECTED_PROVIDER_MAP)
+    assert len(PROVIDER_MAP) == 53 == len(EXPECTED_PROVIDER_MAP)
     assert PROVIDER_MAP == EXPECTED_PROVIDER_MAP
 
 
@@ -107,7 +107,7 @@ TESTS = [
     test_no_orphan_keys_in_coreutils_flavor,
     test_flavor_values_are_gnu_or_bsd,
     test_loader_exposes_coreutils_flavor_correctly,
-    test_provider_map_unchanged_by_flavor_work,
+    test_provider_map_matches_pinned_fixture,
 ]
 
 

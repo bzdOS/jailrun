@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from providers import MULTI_BINARY_PKGS, PKG_ARTIFACTS, PORT_ARTIFACTS
+from providers import MULTI_BINARY_PKGS, MULTI_BINARY_SUFFIX, PKG_ARTIFACTS, PORT_ARTIFACTS
 
 log = logging.getLogger(__name__)
 
@@ -603,7 +603,12 @@ def fill_artifact_paths(
                 # artifact-reality check — use the ORIGINAL binary's own
                 # basename instead, since FreeBSD ports for GNU-compatible
                 # tools install under the same name as their Linux counterparts.
-                native["artifact_path"] = f"/usr/local/bin/{Path(binary['path']).name}"
+                # Some ports install ONLY versioned names (gcc16 -> gcc16/g++16,
+                # llvm22 -> clang22/clang++22, no unversioned symlink) — append
+                # MULTI_BINARY_SUFFIX's per-pkg version so the resolved path
+                # matches the real on-disk binary (confirmed live 2026-07-24).
+                suffix = MULTI_BINARY_SUFFIX.get(target, "")
+                native["artifact_path"] = f"/usr/local/bin/{Path(binary['path']).name}{suffix}"
             else:
                 native["artifact_path"] = resolved[key]
             binary["status"] = "native"  # confirm

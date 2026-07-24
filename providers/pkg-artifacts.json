@@ -24,6 +24,20 @@
     "help2man": "/usr/local/bin/help2man",
     "gperf": "/usr/local/bin/gperf",
     "zip": "/usr/local/bin/zip",
-    "m4": "/usr/local/bin/gm4"
+    "m4": "/usr/local/bin/gm4",
+    "python310": "/usr/local/bin/python3.10",
+    "gtar": "/usr/local/bin/gtar",
+    "dash": "/usr/local/bin/dash",
+    "meson": "/usr/local/bin/meson",
+    "zsh": "/usr/local/bin/zsh",
+    "bzip2": "/usr/local/bin/bzip2",
+    "gzip": "/usr/local/bin/gzip",
+    "unzip": "/usr/local/bin/unzip",
+    "openssl": "/usr/local/bin/openssl",
+    "bazel": "/usr/local/bin/bazel",
+    "php83": "/usr/local/bin/php",
+    "py311-pip": "/usr/local/bin/pip",
+    "scons-py312": "/usr/local/bin/scons",
+    "openjdk21": "/usr/local/openjdk21/bin/java"
   }
 }

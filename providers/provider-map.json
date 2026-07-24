@@ -12,11 +12,11 @@
     "gmake": "pkg:gmake",
     "meson": "pkg:meson",
     "bazel": "pkg:bazel",
-    "scons": "pkg:scons",
-    "gcc": "pkg:gcc",
-    "g++": "pkg:gcc",
-    "clang": "pkg:llvm",
-    "clang++": "pkg:llvm",
+    "scons": "pkg:scons-py312",
+    "gcc": "pkg:gcc16",
+    "g++": "pkg:gcc16",
+    "clang": "pkg:llvm22",
+    "clang++": "pkg:llvm22",
     "ld": "pkg:binutils",
     "ar": "pkg:binutils",
     "objcopy": "pkg:binutils",
@@ -30,7 +30,6 @@
     "xtensa-esp32s2-elf-gcc": "port:devel/xtensa-esp-elf",
     "xtensa-esp32s3-elf-gcc": "port:devel/xtensa-esp-elf",
     "xtensa-lx106-elf-gcc": "port:devel/xtensa-esp-elf",
-    "riscv32-esp-elf-gcc": "port:devel/riscv32-esp-elf",
     "node": "pkg:node",
     "nodejs": "pkg:node",
     "ruby": "pkg:ruby",
@@ -54,7 +53,6 @@
     "openssl": "pkg:openssl",
     "sqlite3": "pkg:sqlite3",
     "pip": "pkg:py311-pip",
-    "pip3": "pkg:py311-pip",
-    "esphome": "pkg:py311-esphome"
+    "pip3": "pkg:py311-pip"
   }
 }

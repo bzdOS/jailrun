@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "suffixes": {
+    "gcc16": "16",
+    "llvm22": "22"
+  }
+}

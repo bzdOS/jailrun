@@ -1,0 +1,541 @@
+{
+  "schema_version": 1,
+  "generated": {
+    "host": "freebsd-15.1-dev",
+    "freebsd_version": "15.1-RC2",
+    "checked_at": "2026-07-24T12:39:21+00:00",
+    "method": "path-exists"
+  },
+  "entries": {
+    "ar": {
+      "provider": "pkg:binutils",
+      "artifact_path": "/usr/local/bin/ar",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "multi-binary-pkg"
+      }
+    },
+    "bash": {
+      "provider": "pkg:bash",
+      "artifact_path": "/usr/local/bin/bash",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "pkg-artifacts"
+      }
+    },
+    "bazel": {
+      "provider": "pkg:bazel",
+      "artifact_path": "/usr/local/bin/bazel",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "pkg-artifacts"
+      }
+    },
+    "bzip2": {
+      "provider": "pkg:bzip2",
+      "artifact_path": "/usr/local/bin/bzip2",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "pkg-artifacts"
+      }
+    },
+    "clang": {
+      "provider": "pkg:llvm22",
+      "artifact_path": "/usr/local/bin/clang22",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "multi-binary-pkg"
+      }
+    },
+    "clang++": {
+      "provider": "pkg:llvm22",
+      "artifact_path": "/usr/local/bin/clang++22",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "multi-binary-pkg"
+      }
+    },
+    "cmake": {
+      "provider": "pkg:cmake",
+      "artifact_path": "/usr/local/bin/cmake",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "pkg-artifacts"
+      }
+    },
+    "curl": {
+      "provider": "pkg:curl",
+      "artifact_path": "/usr/local/bin/curl",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "pkg-artifacts"
+      }
+    },
+    "dash": {
+      "provider": "pkg:dash",
+      "artifact_path": "/usr/local/bin/dash",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "pkg-artifacts"
+      }
+    },
+    "g++": {
+      "provider": "pkg:gcc16",
+      "artifact_path": "/usr/local/bin/g++16",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "multi-binary-pkg"
+      }
+    },
+    "gcc": {
+      "provider": "pkg:gcc16",
+      "artifact_path": "/usr/local/bin/gcc16",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "multi-binary-pkg"
+      }
+    },
+    "git": {
+      "provider": "pkg:git",
+      "artifact_path": "/usr/local/bin/git",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "pkg-artifacts"
+      }
+    },
+    "gmake": {
+      "provider": "pkg:gmake",
+      "artifact_path": "/usr/local/bin/gmake",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "pkg-artifacts"
+      }
+    },
+    "gzip": {
+      "provider": "pkg:gzip",
+      "artifact_path": "/usr/local/bin/gzip",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "pkg-artifacts"
+      }
+    },
+    "java": {
+      "provider": "pkg:openjdk21",
+      "artifact_path": "/usr/local/openjdk21/bin/java",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "pkg-artifacts"
+      }
+    },
+    "ld": {
+      "provider": "pkg:binutils",
+      "artifact_path": "/usr/local/bin/ld",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "multi-binary-pkg"
+      }
+    },
+    "lua": {
+      "provider": "pkg:lua54",
+      "artifact_path": "/usr/local/bin/lua54",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "heuristic"
+      }
+    },
+    "make": {
+      "provider": "pkg:gmake",
+      "artifact_path": "/usr/local/bin/gmake",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "pkg-artifacts"
+      }
+    },
+    "meson": {
+      "provider": "pkg:meson",
+      "artifact_path": "/usr/local/bin/meson",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "pkg-artifacts"
+      }
+    },
+    "ninja": {
+      "provider": "pkg:ninja",
+      "artifact_path": "/usr/local/bin/ninja",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "pkg-artifacts"
+      }
+    },
+    "nm": {
+      "provider": "pkg:binutils",
+      "artifact_path": "/usr/local/bin/nm",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "multi-binary-pkg"
+      }
+    },
+    "node": {
+      "provider": "pkg:node",
+      "artifact_path": "/usr/local/bin/node",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "heuristic"
+      }
+    },
+    "nodejs": {
+      "provider": "pkg:node",
+      "artifact_path": "/usr/local/bin/node",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "heuristic"
+      }
+    },
+    "objcopy": {
+      "provider": "pkg:binutils",
+      "artifact_path": "/usr/local/bin/objcopy",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "multi-binary-pkg"
+      }
+    },
+    "openssl": {
+      "provider": "pkg:openssl",
+      "artifact_path": "/usr/local/bin/openssl",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "pkg-artifacts"
+      }
+    },
+    "perl": {
+      "provider": "pkg:perl5",
+      "artifact_path": "/usr/local/bin/perl",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "pkg-artifacts"
+      }
+    },
+    "perl5": {
+      "provider": "pkg:perl5",
+      "artifact_path": "/usr/local/bin/perl",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "pkg-artifacts"
+      }
+    },
+    "php": {
+      "provider": "pkg:php83",
+      "artifact_path": "/usr/local/bin/php",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "pkg-artifacts"
+      }
+    },
+    "pip": {
+      "provider": "pkg:py311-pip",
+      "artifact_path": "/usr/local/bin/pip",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "pkg-artifacts"
+      }
+    },
+    "pip3": {
+      "provider": "pkg:py311-pip",
+      "artifact_path": "/usr/local/bin/pip",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "pkg-artifacts"
+      }
+    },
+    "python": {
+      "provider": "pkg:python311",
+      "artifact_path": "/usr/local/bin/python3.11",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "pkg-artifacts"
+      }
+    },
+    "python3": {
+      "provider": "pkg:python311",
+      "artifact_path": "/usr/local/bin/python3.11",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "pkg-artifacts"
+      }
+    },
+    "python3.10": {
+      "provider": "pkg:python310",
+      "artifact_path": "/usr/local/bin/python3.10",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "pkg-artifacts"
+      }
+    },
+    "python3.11": {
+      "provider": "pkg:python311",
+      "artifact_path": "/usr/local/bin/python3.11",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "pkg-artifacts"
+      }
+    },
+    "python3.12": {
+      "provider": "pkg:python312",
+      "artifact_path": "/usr/local/bin/python3.12",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "pkg-artifacts"
+      }
+    },
+    "readelf": {
+      "provider": "pkg:binutils",
+      "artifact_path": "/usr/local/bin/readelf",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "multi-binary-pkg"
+      }
+    },
+    "ruby": {
+      "provider": "pkg:ruby",
+      "artifact_path": "/usr/local/bin/ruby",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "heuristic"
+      }
+    },
+    "scons": {
+      "provider": "pkg:scons-py312",
+      "artifact_path": "/usr/local/bin/scons",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "pkg-artifacts"
+      }
+    },
+    "sh": {
+      "provider": "pkg:bash",
+      "artifact_path": "/usr/local/bin/bash",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "pkg-artifacts"
+      }
+    },
+    "sqlite3": {
+      "provider": "pkg:sqlite3",
+      "artifact_path": "/usr/local/bin/sqlite3",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "heuristic"
+      }
+    },
+    "strip": {
+      "provider": "pkg:binutils",
+      "artifact_path": "/usr/local/bin/strip",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "multi-binary-pkg"
+      }
+    },
+    "tar": {
+      "provider": "pkg:gtar",
+      "artifact_path": "/usr/local/bin/gtar",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "pkg-artifacts"
+      }
+    },
+    "unzip": {
+      "provider": "pkg:unzip",
+      "artifact_path": "/usr/local/bin/unzip",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "pkg-artifacts"
+      }
+    },
+    "wget": {
+      "provider": "pkg:wget",
+      "artifact_path": "/usr/local/bin/wget",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "pkg-artifacts"
+      }
+    },
+    "xtensa-esp32-elf-g++": {
+      "provider": "port:devel/xtensa-esp-elf",
+      "artifact_path": "/usr/local/xtensa-esp-elf/bin/xtensa-esp-elf-gcc",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "port-artifacts"
+      }
+    },
+    "xtensa-esp32-elf-gcc": {
+      "provider": "port:devel/xtensa-esp-elf",
+      "artifact_path": "/usr/local/xtensa-esp-elf/bin/xtensa-esp-elf-gcc",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "port-artifacts"
+      }
+    },
+    "xtensa-esp32-elf-ld": {
+      "provider": "port:devel/xtensa-esp-elf",
+      "artifact_path": "/usr/local/xtensa-esp-elf/bin/xtensa-esp-elf-gcc",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "port-artifacts"
+      }
+    },
+    "xtensa-esp32-elf-objcopy": {
+      "provider": "port:devel/xtensa-esp-elf",
+      "artifact_path": "/usr/local/xtensa-esp-elf/bin/xtensa-esp-elf-gcc",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "port-artifacts"
+      }
+    },
+    "xtensa-esp32s2-elf-gcc": {
+      "provider": "port:devel/xtensa-esp-elf",
+      "artifact_path": "/usr/local/xtensa-esp-elf/bin/xtensa-esp-elf-gcc",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "port-artifacts"
+      }
+    },
+    "xtensa-esp32s3-elf-gcc": {
+      "provider": "port:devel/xtensa-esp-elf",
+      "artifact_path": "/usr/local/xtensa-esp-elf/bin/xtensa-esp-elf-gcc",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "port-artifacts"
+      }
+    },
+    "xtensa-lx106-elf-gcc": {
+      "provider": "port:devel/xtensa-esp-elf",
+      "artifact_path": "/usr/local/xtensa-esp-elf/bin/xtensa-esp-elf-gcc",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "port-artifacts"
+      }
+    },
+    "zip": {
+      "provider": "pkg:zip",
+      "artifact_path": "/usr/local/bin/zip",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "pkg-artifacts"
+      }
+    },
+    "zsh": {
+      "provider": "pkg:zsh",
+      "artifact_path": "/usr/local/bin/zsh",
+      "verification": "exists",
+      "evidence": {
+        "method": "path-exists",
+        "result": "present",
+        "source": "pkg-artifacts"
+      }
+    }
+  }
+}

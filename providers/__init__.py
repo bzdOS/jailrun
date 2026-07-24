@@ -58,6 +58,7 @@ _provider_map_data = _load_json("provider-map.json")
 _pkg_artifacts_data = _load_json("pkg-artifacts.json")
 _port_artifacts_data = _load_json("port-artifacts.json")
 _multi_binary_pkgs_data = _load_json("multi-binary-pkgs.json")
+_multi_binary_suffix_data = _load_json("multi-binary-suffix.json")
 _coreutils_flavor_data = _load_json("coreutils-flavor.json")
 
 # PUBLIC_API — same shapes/types probe.py / bakery.py used to define inline.
@@ -75,6 +76,15 @@ PORT_ARTIFACTS: dict[str, str] = dict(_port_artifacts_data["artifacts"])
 # matching the package name (see bakery.fill_artifact_paths()).
 MULTI_BINARY_PKGS: frozenset[str] = frozenset(_multi_binary_pkgs_data["packages"])
 
+# Version suffix applied to each multi-binary pkg's installed binary name.
+# Some packages install ONLY versioned binaries (e.g. gcc16 -> /usr/local/bin/gcc16,
+# g++16; llvm22 -> clang22, clang++22) with NO unversioned symlink, so resolving a
+# Linux basename "gcc" via the bare multi-binary rule (/usr/local/bin/<basename>)
+# would point at a path that does not exist. This map gives, per multi-binary pkg,
+# the suffix appended to the basename: gcc16 -> "16", llvm22 -> "22". Packages absent
+# from the map (e.g. binutils) get "" (their binaries ARE unversioned: ar/ld/nm/...).
+MULTI_BINARY_SUFFIX: dict[str, str] = dict(_multi_binary_suffix_data["suffixes"])
+
 # Descriptive metadata about EXISTING PROVIDER_MAP entries for coreutils-class binaries:
 # key: basename, already a key in PROVIDER_MAP. value: "gnu" | "bsd" — which flavor
 # PROVIDER_MAP's CURRENT mapping for that binary already resolves to. Additive-only:
@@ -87,5 +97,6 @@ __all__ = [
     "PKG_ARTIFACTS",
     "PORT_ARTIFACTS",
     "MULTI_BINARY_PKGS",
+    "MULTI_BINARY_SUFFIX",
     "COREUTILS_FLAVOR",
 ]
