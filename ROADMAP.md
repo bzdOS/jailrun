@@ -161,4 +161,69 @@ The agent bet, part two — breadth.
 
 - Compat matrix: agents probe the top ~500 Docker Hub images; `explain`
   verdicts published as data in-repo (+ a generated page). This is the
-  public art
+  public artifact that makes the project discoverable: someone searching
+  "can I run $IMAGE on FreeBSD" finds jailrun's verdict page, which is
+  both a marketing surface and a compatibility index.
+- Performance budget: time-to-`jexec` under 3s for a cached, non-Linuxulator
+  image on a warm ZFS ARC (the fast path). Profiled and optimized against
+  the fixed overhead of clone → mount → jail -c.
+- Pre-computed manifest cache on the store level so `jailrun run` on a
+  previously-seen image skips probe/bakery entirely (beyond the per-clone
+  `.jailrun/` cache that already exists).
+- Parallel jail lifecycle benchmark: 16 concurrent `jailrun run` jobs on
+  a single host, measuring wall-clock throughput, rctl isolation (one
+  OOM-killed run must never affect its neighbour), and teardown latency.
+
+**Exit:** the top-500 compat matrix published and CI-regenerated monthly;
+`jailrun explain $RANDOM_IMAGE` returns a verdict for 90%+ of queries;
+p50 jail-creation latency under 3s on reference hardware (4-core FreeBSD VM,
+SSD-backed ZFS).
+
+### 1.0 — Production readiness (S)
+
+The final gate — not a feature milestone, a stability and documentation
+milestone.
+
+- `CHANGELOG.md` complete from 0.1 to 1.0, with upgrade notes.
+- Public API (CLI flags, exit codes, environment variables, the provider
+  registry format, the substitution manifest schema) frozen under semver:
+  any incompatible change after 1.0 bumps the major version.
+- `jailrun doctor` passes on a stock FreeBSD 14.x/15.x install after
+  following `SECURITY.md` + `CONTRIBUTING.md`.
+- At least one end-to-end tutorial in `README.md`: "compile an ESP32
+  firmware on FreeBSD in 5 minutes", reproducing the original proof that
+  motivated the project.
+- No known-unsafe defaults: every documented security gap has at least a
+  workaround or explicit opt-in warning, nothing is silently insecure.
+- Release artifacts: the `jailrun` binary is distributable as a single-file
+  Python zipapp (or compiled binary via Nuitka/PyInstaller) with vendored
+  dependencies, so a user needs only `pkg install jailrun` or a single
+  download, not a `git clone && pip install` dance.
+
+**Exit:** semver-1.0 tag on GitHub; the tutorial works from a fresh FreeBSD
+install; `pip install jailrun` (or `pkg install jailrun`) produces a working
+binary; no open issues tagged `security` or `blocker`.
+
+## Beyond 1.0
+
+Things deliberately deferred past 1.0 — not because they aren't valuable,
+but because they aren't required for the project to be useful and safe for
+its initial use case:
+
+- **Port to Linux jails / Linux cgroups** — if FreeBSD jails ever gain
+  first-class OCI runtime support, jailrun's architecture maps directly;
+  until then, this is FreeBSD-only by design, not by accident.
+- **Windows (WSL2-style) compatibility** — a different audience and host
+  interface; jailrun's three-seam split (store / probe / runtime) means a
+  new backend could slot in, but nobody has asked for it.
+- **OCI runtime spec compliance (`runtime-spec`)** — jailrun intentionally
+  does not implement the full OCI Runtime Specification (no `config.json`,
+  no hooks spec, no stdin TTY). It solves a narrower problem better.
+  If the ecosystem demands compliance, that is a separate project or a
+  major 2.0 redesign.
+
+---
+
+*This roadmap is a living document. Milestones are reordered, split, or
+merged as real use reveals what matters. The exit criteria are the truth;
+the ordering is a best guess.*

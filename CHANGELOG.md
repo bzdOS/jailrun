@@ -4,7 +4,20 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.2.0] - 2026-07-24
+
+### Added — roadmap 0.4 destination-scoped network
+- **`--network allow=host[:port][,...]`** — per-jail pf anchor with loopback
+  alias IP, NAT, and destination-scoped egress. Pure policy in
+  `runtime/netpolicy.py` (16 unit tests, injectable resolver/alloc); host
+  effects in `runtime/netops.py` (ifconfig/pfctl shell-outs); wired into
+  `engine.py`'s full lifecycle (`apply_network` before `jail -c`,
+  `teardown_network` after `jail -r`). The `_build_jail_conf` already accepted
+  `network='allow'` + `ip4_addr`; now the CLI passes it through and the engine
+  allocates from a 10.99.0.0/24 loopback pool. Design doc at
+  `docs/DESIGN-network.md` with live pf-tagging PoC result.
+- **ROADMAP.md completed** — restored from mid-sentence truncation at 0.7
+  through 1.0 and beyond-1.0 sections.
 
 ### Added (2026-07-24) — roadmap 0.3, L2 ("runs") verification rung
 - **`verify_runs()` in `providers/backfill.py`** — climbs the verification
@@ -365,3 +378,7 @@ This is enough to use jailrun as a security boundary for untrusted third-party c
 no adversarial red-team review yet, no Capsicum, and network isolation is currently
 binary on/off rather than scoped by destination (true VNET+pf segmentation) — worth
 revisiting if the threat model grows past a single-host compile sandbox.
+
+[Unreleased]: https://github.com/bzdOS/jailrun/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/bzdOS/jailrun/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/bzdOS/jailrun/releases/tag/v0.1.0

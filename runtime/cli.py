@@ -45,7 +45,7 @@ import sys
 # ---------------------------------------------------------------------------
 # Version stub — replaced once we have a real release mechanism.
 # ---------------------------------------------------------------------------
-JAILRUN_VERSION = "0.1.0"
+JAILRUN_VERSION = "0.2.0"
 
 
 # ---------------------------------------------------------------------------
@@ -188,14 +188,16 @@ def _build_parser() -> argparse.ArgumentParser:
     run_p.add_argument(
         "--network",
         dest="network",
-        choices=("none", "inherit"),
         default="none",
         help=(
             "'none' (default): no network inside the jail (ip4/ip6 disabled) — "
             "package/toolchain provisioning already happens on the host before the "
             "jail is created, so this is safe for the native-first path. 'inherit': "
             "opt-in, shares the host's network stack — only for commands that "
-            "genuinely need registry/network access at exec time."
+            "genuinely need registry/network access at exec time. "
+            "'allow=host[:port][,...]': destination-scoped egress via pf anchor "
+            "(0.4) — the jail gets a dedicated loopback alias IP and only the "
+            "listed destinations are reachable."
         ),
     )
     run_p.add_argument(

@@ -100,6 +100,18 @@ from typing import Any, Callable
 
 log = logging.getLogger("jailrun.engine")
 
+# Per-run jail IP tracking for 0.4 destination-scoped network — ensures
+# concurrent _run_async calls don't collide on loopback aliases. Each call
+# allocates from alloc_jail_ip() (default 10.99.0.0/24 pool), adds to
+# _netpolicy_used_ips, and removes on teardown.
+_netpolicy_used_ips: set[str] = set()
+_netpolicy_lock: Any = None
+try:
+    import threading
+    _netpolicy_lock = threading.Lock()
+except ImportError:
+    pass
+
 
 # ===========================================================================
 # Mock seam imports — replaced by real implementations when S2/S3/S4 land.
@@ -1016,6 +1028,16 @@ async def _run_async(
     env: dict[str, str] = opts.get("env", {})
     workdir: str | None = opts.get("workdir")
     network: str = opts.get("network", "none")
+    # Early validation of the network spec (parse_network_spec raises ValueError
+    # on bad syntax) — done here so a malformed --network is rejected before any
+    # expensive resolve/unpack/clone work. The full resolution + rendering happens
+    # later once jail_name is known (see START_NETWORK_ALLOW_SETUP below).
+    _network_spec: Any = None
+    _jail_ip: str | None = None
+    _net_rules_text: str | None = None
+    if network.startswith("allow"):
+        from runtime.netpolicy import parse_network_spec  # noqa: PLC0415
+        _network_spec = parse_network_spec(network)
     allow_raw_sockets: bool = opts.get("allow_raw_sockets", False)
     rctl_enabled: bool = opts.get("rctl_enabled", True)
     rctl_rules: tuple[str, ...] = (
@@ -1244,6 +1266,48 @@ async def _run_async(
         # as an invalid parameter name. Found live 2026-07-19.
         jail_name = f"jailrun-{handle.id}"
         handle.jail_name = jail_name  # so store.destroy()'s own jail -r step is live too
+
+        # START_NETWORK_ALLOW_SETUP
+        # ------------------------------------------------------------------
+        # 6a. For destination-scoped network (--network allow=...), resolve the
+        #     allow-list, detect the egress interface, allocate a loopback alias
+        #     IP, render the pf sub-anchor rules, and apply them (ifconfig alias +
+        #     pfctl load) before `jail -c`. Everything is resolved BEFORE jail
+        #     creation so DNS failures or pool exhaustion abort early.
+        # ------------------------------------------------------------------
+        if _network_spec is not None:
+            from runtime.netpolicy import resolve_allowlist, host_resolvers, alloc_jail_ip, render_pf_anchor  # noqa: PLC0415
+            from runtime.netops import detect_ext_if, apply_network  # noqa: PLC0415
+            resolved = resolve_allowlist(_network_spec.allow)
+            resolvers = host_resolvers()
+            ext_if = detect_ext_if()
+            if ext_if is None:
+                raise RuntimeError(
+                    "network='allow' requires a default route (detect_ext_if() "
+                    "returned None) — cannot determine the egress interface"
+                )
+            if _netpolicy_lock is not None:
+                _netpolicy_lock.acquire()
+            try:
+                _jail_ip = alloc_jail_ip(used=_netpolicy_used_ips)
+                _netpolicy_used_ips.add(_jail_ip)
+            finally:
+                if _netpolicy_lock is not None:
+                    _netpolicy_lock.release()
+            _net_rules_text = render_pf_anchor(
+                jail_name=jail_name,
+                jail_ip=_jail_ip,
+                ext_if=ext_if,
+                resolved=resolved,
+                resolvers=resolvers,
+            )
+            apply_network(jail_name, _jail_ip, _net_rules_text)
+            log.info(
+                "destination-scoped network for %s: ip=%s ext_if=%s %d allow-entries %d resolvers",
+                jail_name, _jail_ip, ext_if, len(resolved), len(resolvers),
+            )
+        # END_NETWORK_ALLOW_SETUP
+
         conf_text = _build_jail_conf(
             jail_name=jail_name,
             rootfs_path=rootfs_path,
@@ -1252,6 +1316,7 @@ async def _run_async(
             linuxulator=linuxulator,
             network=network,
             allow_raw_sockets=allow_raw_sockets,
+            ip4_addr=_jail_ip,
         )
 
         # Write jail.conf to a tempfile.
@@ -1400,6 +1465,28 @@ async def _run_async(
                 await _clear_rctl(jail_name)
             except Exception as exc:  # noqa: BLE001
                 log.warning("failed to clear rctl rules for %s (non-fatal): %s", jail_name, exc)
+
+            # Teardown destination-scoped network (0.4): flush the pf sub-anchor
+            # and remove the loopback alias IP. Best-effort — must never change
+            # the run's exit code (same as the lifecycled/rctl teardown above).
+            # Uses _jail_ip which is only set when _network_spec is not None
+            # (i.e. --network allow=... was used).
+            if _jail_ip is not None:
+                try:
+                    from runtime.netops import teardown_network  # noqa: PLC0415
+                    teardown_network(jail_name, _jail_ip)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "failed to teardown network for %s (non-fatal): %s", jail_name, exc,
+                    )
+                finally:
+                    if _netpolicy_lock is not None:
+                        _netpolicy_lock.acquire()
+                    try:
+                        _netpolicy_used_ips.discard(_jail_ip)
+                    finally:
+                        if _netpolicy_lock is not None:
+                            _netpolicy_lock.release()
 
             # Record the run's terminal status for `jailrun ps` (runtime/rundb.py).
             # Gated on jail_created: only record an exit if a record_start was
