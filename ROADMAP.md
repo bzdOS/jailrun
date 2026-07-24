@@ -235,7 +235,7 @@ green; SIGKILL-at-every-stage corpus leaves no orphans after `gc --fix`;
 doctor catches missing pf hooks. Everything that will ship in 1.0 has been
 exercised under load, not just unit-tested.
 
-### 1.0 — Production readiness (S)
+### 1.0 — Production readiness (S) — 🚧 ALPHA 2026-07-25 (tag v1.0.0-alpha.1)
 
 The final gate — not a feature milestone, a stability and documentation
 milestone.

@@ -12,7 +12,7 @@
 #               probe (S2 seam — produces substitution manifest for a rootfs);
 #               bakery (S4 seam — fills native.artifact_path in the manifest);
 #               runtime._mocks (fallback stubs when real seams are absent);
-#               runtime.lifecycle (bsdos_lifecycled teardown, imported lazily);
+#               runtime.lifecycle (native jexec teardown, imported lazily);
 #               runtime.rundb (RunDB run-state ledger, imported lazily — see the
 #               record_start/record_exit call sites in _run_async, and the
 #               best-effort liveness check in _check_jail_live for exec_run);
@@ -91,6 +91,7 @@ import logging
 import os
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import tempfile
@@ -671,7 +672,7 @@ DEFAULT_RCTL_RULES: tuple[str, ...] = (
 #   sideEffects: runs 'sysctl -n kern.racct.enable'
 #   rationale: racct cannot be toggled at runtime; if off, every `rctl -a` call
 #              would fail — check once and degrade gracefully (mirrors the
-#              lifecycled NotAvailable pattern) instead of spamming failures
+#              lifecycle NotAvailable pattern) instead of spamming failures
 async def _racct_enabled() -> bool:
     rc, out, _err = await _run_subprocess(["sysctl", "-n", "kern.racct.enable"], check=False)
     return rc == 0 and out.strip() == "1"
@@ -1040,7 +1041,7 @@ def run(image_ref: str, cmd: list[str], opts: dict[str, Any]) -> int:
 #     - closes the log file (if opened), in the finally block, regardless of
 #       how the run ended
 #     - runs subprocess `jail -r <jail_name>` to remove the jail (always, in finally)
-#     - calls runtime.lifecycle.teardown(jail_name) if lifecycled is present
+#     - calls runtime.lifecycle.teardown(jail_name) (native jexec SIGKILL)
 #     - calls RunDB().record_exit(jail_name, ...) in the finally block, iff a
 #       record_start was ever attempted (best-effort — never raises)
 #     - calls _store_module.destroy(handle) when opts.rm is True
@@ -1255,6 +1256,23 @@ async def _run_async(
             log.info("mounted %d bind volume(s)", len(volumes))
         # END_MOUNT_BIND_VOLUMES
 
+        # ------------------------------------------------------------------
+        # 4c-bis. Copy /etc/resolv.conf when the jail has network access
+        # ------------------------------------------------------------------
+        # Without this, DNS resolution fails inside the jail for ALL images
+        # (not just Alpine/musl). We copy (not bind-mount) the host's
+        # resolv.conf into the jail's rootfs so the jailed process can resolve
+        # hostnames. A copy is simpler and more robust than a nullfs file-level
+        # mount (which has "must be same type" quirks on FreeBSD). Only done
+        # when network != "none" — a no-network jail has no use for DNS.
+        if network != "none":
+            host_resolv = Path("/etc/resolv.conf")
+            if host_resolv.exists():
+                jail_etc = rootfs_path / "etc"
+                jail_etc.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(host_resolv), str(jail_etc / "resolv.conf"))
+                log.info("copied /etc/resolv.conf into rootfs (network=%s)", network)
+
         # START_LINUXULATOR_SETUP
         # ------------------------------------------------------------------
         # 4d. Conditionally load Linuxulator (linux64 kmod + filesystems)
@@ -1463,15 +1481,14 @@ async def _run_async(
         # 8. Teardown: stop jail; optionally destroy rootfs clone
         # ------------------------------------------------------------------
         if jail_name is not None:
-            # Process teardown via bsdos_lifecycled (SIGKILL all PIDs + bsdOS
-            # cleanup) when the daemon is present — best-effort, never fatal.
-            # See runtime/lifecycle.py for the wire protocol + responsibility split.
+            # Process teardown: native SIGKILL all PIDs via jexec (best-effort,
+            # never fatal). See runtime/lifecycle.py.
             try:
                 from runtime.lifecycle import teardown as _lc_teardown  # noqa: PLC0415
                 await _lc_teardown(jail_name)
             except Exception as exc:  # noqa: BLE001
-                log.warning("lifecycled teardown of %s failed (non-fatal): %s", jail_name, exc)
-            # Always remove the persist jail itself (works with or without lifecycled).
+                log.warning("lifecycle teardown of %s failed (non-fatal): %s", jail_name, exc)
+            # Always remove the persist jail itself.
             # [GOTCHA] `jail -r <name>` WITHOUT `-f <conf_path>` does not unmount the
             # jail's own `mount +=`/`mount.devfs` entries (linprocfs/linsysfs/tmpfs/
             # fdescfs/devfs) — confirmed live 2026-07-19: every one
@@ -1504,7 +1521,7 @@ async def _run_async(
 
             # Teardown destination-scoped network (0.4): flush the pf sub-anchor
             # and remove the loopback alias IP. Best-effort — must never change
-            # the run's exit code (same as the lifecycled/rctl teardown above).
+            # the run's exit code (same as the lifecycle/rctl teardown above).
             # Uses _jail_ip which is only set when _network_spec is not None
             # (i.e. --network allow=... was used).
             if _jail_ip is not None:

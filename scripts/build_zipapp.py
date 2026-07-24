@@ -33,7 +33,7 @@ def build_zipapp():
         shutil.rmtree(tmp)
 
     # Determine version
-    v = "0.7.0"
+    v = "1.0.0a1"
     try:
         r = subprocess.run(
             ["git", "-C", str(REPO), "describe", "--tags", "--dirty=.dirty"],

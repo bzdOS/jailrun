@@ -198,5 +198,5 @@ tag changes or a Linuxulator improvement lands in FreeBSD.
 |---|---|
 | `probe.py` | Main classifier; run on any host (pure Python ELF parsing) |
 | `test_classify.py` | Unit tests for ELF classifier; `python3 test_classify.py` |
-| `smoke.freebsd.sh` | Linuxulator smoke harness; **freebsd-host only** — `# UNVERIFIED` |
+| `smoke.freebsd.sh` | Linuxulator smoke harness; **FreeBSD only** (validated on 15.1) |
 | `README.md` | This file |

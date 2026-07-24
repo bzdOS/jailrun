@@ -1,6 +1,6 @@
 # jailrun — GNU-vs-BSD Substitution Policy
 
-**Status: pre-alpha, first pass.** This document is the first concrete
+**Status: 1.0, first pass.** This document is the first concrete
 artifact for ROADMAP.md's 0.3 "Substitution policy per entry" item. It
 states the policy, then audits `providers/provider-map.json` as it actually
 stands today against that policy — honestly, including the parts that

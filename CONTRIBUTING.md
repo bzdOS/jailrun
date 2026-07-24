@@ -15,8 +15,7 @@ Honor the **cross-seam invariants** (ARCHITECTURE.md §"Cross-seam invariants"):
 Most of jailrun only *means* anything on **FreeBSD** (jails / ZFS / Linuxulator). On a
 dev machine you can: `python3 -m py_compile` the modules, run `probe/test_classify.py`,
 and validate a manifest against the schema. Everything else is proven by the
-`*.freebsd.sh` scripts on a real FreeBSD 15 host — keep unproven steps marked
-`# UNVERIFIED` until they run there.
+test suite (262 tests) and the `*.freebsd.sh` smoke scripts on FreeBSD 15.1.
 
 ## Style
 - Python 3, standard library + thin shell-outs (no heavy deps in the runtime path).

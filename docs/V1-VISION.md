@@ -168,9 +168,9 @@ does worse" story, achievable with zero kernel patches or modules.
 ## Speed of the dev loop
 
 ### 7. Instant dev mode
-`bsdos_lifecycled` already has freeze/thaw/hibernate — v1 wires it up:
-`jailrun dev` keeps the container SIGSTOPped between iterations and thaws it
-in milliseconds on file change; hibernates to a snapshot when idle. Plus a
+`runtime/lifecycle.py` already has freeze/thaw (native `jexec kill`) — v1 wires
+it up: `jailrun dev` keeps the container SIGSTOPped between iterations and thaws
+it in milliseconds on file change; hibernates to a snapshot when idle. Plus a
 warm pool of pre-cloned, pre-thawed jails — perceived start time is zero.
 
 ### 8. The CI farm

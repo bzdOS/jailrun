@@ -1,9 +1,9 @@
 # jailrun — Usage
 
 This covers the four commands jailrun currently ships: `run`, `explain`, `doctor`,
-`version`. (`ps` is a stub being rewritten and isn't documented here; the jail
-lifecycle verbs `freeze`/`thaw`/`hibernate`/`restore` delegate to a separate
-daemon, `bsdos_lifecycled`, and are out of scope too.)
+`version`. (`ps` and `logs` read from the run-state SQLite database and are
+documented briefly below; the jail lifecycle verbs `freeze`/`thaw` use native
+`jexec kill` — see `runtime/lifecycle.py`.)
 
 Every example below is real output captured by actually running the command —
 see the "how to reproduce" note under each one.
@@ -49,7 +49,7 @@ says a binary needs it.
 | `--allow-raw-sockets` | — | off | Allow raw sockets inside the jail (e.g. for ping-like diagnostics). Jails are plain (no VNET), so this is host-network-wide |
 | `--no-rctl` | — | rctl **on** by default | Disable rctl resource limits (CPU/memory/process/disk-IO) |
 | `--rctl-rule` | `ACTION:VALUE` (repeatable) | built-in defaults | Override the default rctl rule set, e.g. `--rctl-rule pcpu:deny=200 --rctl-rule memoryuse:deny=4g`. Replaces (does not merge with) the built-in defaults |
-| `-it` | — | off | Allocate a pseudo-TTY and keep stdin open (mirrors `docker -it`; **stub — interactive PTY not yet implemented**) |
+| `-it` | — | off | Allocate a pseudo-TTY and keep stdin open (**not yet implemented — errors if used**) |
 
 Positional: `IMAGE` (required, e.g. `alpine:3.19` or `esphome/esphome:2025.5`),
 then `CMD` (everything after IMAGE, passed straight through as argv inside the
@@ -242,9 +242,10 @@ jailrun doctor [--format text|json]
 ```
 
 Inspects the host and reports jailrun readiness: required tools (`skopeo`,
-`bsdtar`), kernel modules (`linux64`), and FreeBSD-specific config (ZFS pool,
-racct, pkg trust keys). Prints exact fix text on failure. Exit code is `0` if
-every check passed or was skipped, `1` if any check failed.
+`bsdtar`), kernel modules (`linux64`), FreeBSD-specific config (ZFS pool,
+racct, pkg trust keys), and pf anchor hooks for `--network allow`. Prints
+exact fix text on failure. Exit code is `0` if every check passed or was
+skipped, `1` if any check failed.
 
 ### Flags
 

@@ -175,7 +175,7 @@ natively in a FreeBSD jail with zero Linux ABI.
 | `cli.py` | Argument parser; mirrors `docker run` flags |
 | `engine.py` | Orchestration: resolve → unpack → clone → shadow → jail → jexec |
 | `_mocks.py` | Stub seams for S2/S3/S4 (py_compile-clean on Linux) |
-| `run.freebsd.sh` | Hand-driven smoke test (plain jail, alpine echo hi) — UNVERIFIED |
+| `run.freebsd.sh` | Hand-driven smoke test (plain jail, alpine echo hi; validated on 15.1) |
 
 ---
 

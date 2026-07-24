@@ -1,5 +1,5 @@
 PORTNAME=	jailrun
-DISTVERSION=	0.7.0
+DISTVERSION=	1.0.0.b1
 CATEGORIES=	sysutils python
 
 MAINTAINER=	ap.bodrov@gmail.com

@@ -11,7 +11,7 @@
 # PUBLIC_API: none — standalone script; argv: <rootfs_dir> <manifest.json> [binary ...]
 # END_AI_HEADER
 # smoke.freebsd.sh — jailrun S2: Linuxulator smoke test
-# UNVERIFIED — runs on freebsd-host (FreeBSD) only; linux-host (Linux) cannot execute this.
+
 #
 # PURPOSE
 #   For each Linux binary that the manifest marks status=linuxulator, run it
@@ -98,7 +98,7 @@ if [ $# -gt 0 ]; then
     BINARIES="$*"
 else
     # Extract linuxulator binaries from manifest
-    # UNVERIFIED: requires python3 on freebsd-host (pkg install python3 or already present)
+
     BINARIES="$(python3 -c "
 import json, sys
 m = json.load(open('$MANIFEST'))
@@ -149,7 +149,7 @@ trap cleanup EXIT INT TERM
 # START_JAIL_CREATE
 echo "# jailrun smoke: starting jail $JAIL_NAME over $ROOTFS" >&2
 
-# UNVERIFIED: jail(8) parameter syntax; adjust for host FreeBSD version.
+
 jail -c \
     name="$JAIL_NAME" \
     path="$ROOTFS" \
@@ -261,6 +261,6 @@ cat "$ENOSYS_LOG"
 #   json.dump(manifest, open("manifest.json", "w"), indent=2)
 #   PY
 #
-# UNVERIFIED: jail parameters, mount commands, and truss output format may
+
 # vary between FreeBSD 13.x and 14.x.  Adjust JAIL_NAME persistence and
 # mount flags as needed for the target host.

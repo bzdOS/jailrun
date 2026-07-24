@@ -112,7 +112,6 @@ and stops on first error so failures are pinpointed.
 | `JAILRUN_STORE_BACKEND` | `zfs` | `zfs` or `plaindir` |
 | `JAILRUN_ZPOOL` | `jailrun` | ZFS pool name |
 | `JAILRUN_SRC` | `/mnt/jailrun` | Path to jailrun source on the VM (if using 9p) |
-| `JAILRUN_LIFECYCLED_SOCK` | `/var/run/bsdos-lifecycle.sock` | bsdos_lifecycled socket |
 
 ---
 

@@ -553,7 +553,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Output format: 'text' (default, human-readable) or 'json'.",
     )
 
-    # ---- jail lifecycle (delegated to bsdos_lifecycled) ---------------------
+    # ---- jail lifecycle (native jexec kill) ----------------------------------
     for verb, helptext in (
         ("freeze", "SIGSTOP a jail's processes (0%% CPU, state stays in RAM)"),
         ("thaw", "SIGCONT a frozen jail (instant resume)"),
@@ -563,7 +563,7 @@ def _build_parser() -> argparse.ArgumentParser:
         lp = sub.add_parser(
             verb,
             help=helptext,
-            description=f"{helptext}\nDelegated to bsdos_lifecycled (see runtime/lifecycle.py).",
+            description=f"{helptext}\nNative jexec kill (see runtime/lifecycle.py).",
         )
         lp.add_argument("jail", help="jail name (e.g. jailrun-<handle>)")
 
@@ -586,6 +586,15 @@ def _build_parser() -> argparse.ArgumentParser:
 def _cmd_run(args: argparse.Namespace) -> int:
     """Dispatch to engine.run(); return exit code."""
     from runtime.engine import run  # noqa: PLC0415  (import inside fn for testability)
+
+    if args.interactive:
+        print(
+            "error: -it (interactive PTY) is not yet implemented.\n"
+            "Use jailrun run (non-interactive) — the command's stdout/stderr\n"
+            "streams to your terminal, but stdin is not connected.",
+            file=sys.stderr,
+        )
+        return 1
 
     opts: dict = {
         "rm": args.rm,
@@ -1009,11 +1018,11 @@ def _cmd_gc(args: argparse.Namespace) -> int:
 #     args: argparse.Namespace — must contain args.jail (jail name string)
 #   output:
 #     exit_code: int — 0 if Lifecycled returns ok or non-dict result; 1 on NotAvailable or res["ok"]==False
-#   sideEffects: calls runtime.lifecycle.Lifecycled().<verb>(args.jail) which sends IPC to
-#                bsdos_lifecycled; prints JSON result or error message to stdout/stderr via print()
+#   sideEffects: calls runtime.lifecycle.Lifecycled().<verb>(args.jail) which runs
+#                jexec kill on FreeBSD; prints JSON result or error to stdout/stderr
 # _cmd_lifecycle:end
 def _cmd_lifecycle(verb: str, args: argparse.Namespace) -> int:
-    """freeze/thaw/hibernate/restore — delegate to bsdos_lifecycled."""
+    """freeze/thaw/hibernate/restore — native jexec kill."""
     import json  # noqa: PLC0415
     from runtime.lifecycle import Lifecycled, NotAvailable  # noqa: PLC0415
 
@@ -1022,7 +1031,7 @@ def _cmd_lifecycle(verb: str, args: argparse.Namespace) -> int:
         print(json.dumps(res) if isinstance(res, dict) else str(res))
         return 0 if (not isinstance(res, dict) or res.get("ok", True)) else 1
     except NotAvailable as exc:
-        print(f"unavailable: {exc}\n(this op needs bsdos_lifecycled running on a FreeBSD host)")
+        print(f"unavailable: {exc}")
         return 1
 
 

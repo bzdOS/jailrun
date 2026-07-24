@@ -34,7 +34,7 @@ def _version_file() -> str | None:
 
 
 def jailrun_version() -> str:
-    v = _git_describe() or _version_file() or "0.7.0"
+    v = _git_describe() or _version_file() or "1.0.0a1"
     return v
 
 
@@ -54,5 +54,5 @@ def version_banner() -> str:
         f"jailrun version {jailrun_version()}\n"
         f"platform: {platform_info()}\n"
         f"runtime: FreeBSD jails + ZFS (freebsd-host only)\n"
-        f"host build: linux-host/Linux (design + scaffold)"
+        f"host build: linux-host/Linux (development)"
     )

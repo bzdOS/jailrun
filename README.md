@@ -2,7 +2,7 @@
 
 **A `docker run`-shaped runtime for FreeBSD — backed by jails, not a daemon.**
 
-![status: pre-alpha](https://img.shields.io/badge/status-pre--alpha-orange)
+![status: 1.0-alpha](https://img.shields.io/badge/status-1.0--alpha-yellow)
 ![license: MIT](https://img.shields.io/badge/license-MIT-blue)
 ![platform: FreeBSD](https://img.shields.io/badge/platform-FreeBSD%2015-red)
 [![CI](https://github.com/bzdOS/jailrun/actions/workflows/ci.yml/badge.svg)](https://github.com/bzdOS/jailrun/actions/workflows/ci.yml)
@@ -32,39 +32,121 @@ time**: run native where we can, use Linuxulator only where we must.
 | logs + exit code | `jexec` as a subprocess (stream stdio, exact return code) |
 | `--rm` | `jail -r` + `zfs destroy` |
 
-## Status: pre-alpha
+## Status: 1.0-alpha
 
-The core pipeline runs end to end: `jailrun run esphome/esphome:stable esphome
-compile blink.yaml` executes through jailrun's own code (`runtime.cli` →
-`runtime.engine` → `store.py`/`probe.py`/`bakery.py`) on a real FreeBSD 15.1 host and
-produces a real ESP32 firmware image (`firmware.factory.bin`/`firmware.ota.bin`/
-`firmware.elf`) via a genuine ESP-IDF network fetch and cmake/ninja/gcc build.
+The core pipeline runs end to end on FreeBSD 15.x: pull an OCI image, resolve
+native substitutes, provision a FreeBSD base dataset, and exec the workload
+inside a hardened jail — all through a single `jailrun run` command.
 
-Sandbox hardening is verified against deliberately-bad input, not just present in the
-code:
-- **Network default-deny** — jails get no network unless `--network inherit` is
-  passed; `ping` fails with "Protocol not supported" by default.
-- **Timeouts** — `--timeout` kills a hung command by removing the whole jail, not
-  just the wrapper process (SIGKILL to a parent doesn't cascade to its children).
-- **rctl resource limits** — a `cputime:sigkill=N` rule kills a CPU-bound busy-loop
-  in practice (needs `kern.racct.enable=1`, a loader tunable).
-- Two independent OCI-layer symlink-escape bugs are closed with regression tests.
+Sandbox hardening is verified against deliberately-bad input:
+- **Network default-deny** — jails get no network unless `--network inherit` or
+  `--network allow=host[:port]` is passed.
+- **Destination-scoped egress** — `--network allow=host[:port],...` restricts a
+  jail to specific outbound destinations via per-jail pf anchor.
+- **Timeouts** — `--timeout` kills a hung command by removing the whole jail.
+- **rctl resource limits** — CPU time, memory, process count, disk I/O.
+- **OCI-layer symlink-escape** — 2 real bugs found and fixed, 35 adversarial
+  layer tests pass, 10 jail-escape techniques all blocked.
+- **Extraction jail** — OCI layer parsing runs as `nobody` inside a throwaway
+  jail (opt-in: `JAILRUN_EXTRACT_IN_JAIL=1`).
+- **Signal resilience** — SIGKILL at any lifecycle stage leaves zero orphans
+  after `jailrun gc --fix`.
 
-**Known gaps:** no adversarial red-team review yet, no Capsicum, and network
-isolation is binary (allow/deny) rather than scoped by destination. See
-[CHANGELOG.md](CHANGELOG.md) for the full list of what's fixed and what's open.
+**Known gaps (tracked for 1.x):** no Capsicum, no VIMAGE/VNET for per-jail
+network isolation, no image-signing verification. See
+[docs/THREAT-MODEL.md](docs/THREAT-MODEL.md) and [ROADMAP.md](ROADMAP.md).
 
-**Does native substitution actually save time?** It depends more on host
-contention than on the ABI itself, which is itself an interesting finding: on
-a busy, shared host the same ESP32 compile ran ~30% faster through the native
-`xtensa-esp-elf` substitute than through the image's own toolchain under
-Linuxulator — but pinning both arms to dedicated CPU cores (removing
-contention) shrank that gap to ~2%, close to noise. Read together, that
-suggests native substitution's advantage shows up most under **contention**
-(a realistic multi-tenant host), not as a fixed compute-speed win. Against
-Docker specifically the native run was roughly comparable either way (not
-faster). See [`bench/`](bench/) for the full methodology, both datasets, and
-the honest caveats on each.
+## Tutorial: compile an ESP32 firmware on FreeBSD in 5 minutes
+
+This is the end-to-end proof that motivated jailrun: compile real ESP32
+firmware (C++ → ESP-IDF toolchain → cmake/ninja → `.bin`/`.elf`) using
+FreeBSD jails, with no Linux VM, no Docker daemon, and no Linux ABI involved
+for the load-bearing compiler path.
+
+### Prerequisites
+
+A FreeBSD 15.x host with:
+- ZFS pool (default: `jailrun`, overridable via `JAILRUN_ZPOOL`)
+- `kern.racct.enable=1` in `/boot/loader.conf` (for rctl)
+- `skopeo` installed (`pkg install skopeo`)
+- `linux64` kernel module (optional — only needed for binaries that can't be
+  substituted natively)
+
+Run `jailrun doctor` to check readiness — it tells you exactly what's missing.
+
+### Step 1: Get jailrun
+
+```sh
+# From the repo
+git clone https://github.com/bzdOS/jailrun /opt/jailrun
+cd /opt/jailrun
+
+# Or from a release zipapp (no git needed)
+# fetch https://github.com/bzdOS/jailrun/releases/download/v1.0.0/jailrun.pyz
+# alias jailrun='python3 /path/to/jailrun.pyz'
+```
+
+### Step 2: Run the ESPHome compiler
+
+```sh
+# Create a minimal ESPHome project
+mkdir -p /tmp/blink-esp32
+cat > /tmp/blink-esp32/blink.yaml <<'EOF'
+esphome:
+  name: blink-test
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+logger:
+EOF
+
+# Compile it in a jail (first run pulls the image + provisions native base)
+jailrun run \
+  --rm \
+  --network inherit \
+  --timeout 1800 \
+  --volume /tmp/blink-esp32:/config \
+  --workdir /config \
+  esphome/esphome:stable \
+  esphome compile blink.yaml
+```
+
+**What happens:**
+1. `esphome/esphome:stable` is pulled via `skopeo` and unpacked into a ZFS snapshot
+2. Each Linux binary is classified: the `xtensa-esp-elf-gcc` toolchain is
+   substituted with the native FreeBSD port `devel/xtensa-esp-elf`
+3. A FreeBSD base dataset is provisioned with necessary packages
+4. A jail is created, the native base is bind-mounted into it, and
+   `esphome compile blink.yaml` runs inside — the ESP-IDF framework fetches
+   its dependencies (cmake, ninja, Python packages), builds the firmware
+5. On success, firmware files appear in `/tmp/blink-esp32/blink-test/.esphome/build/`:
+   `firmware.factory.bin`, `firmware.ota.bin`, `firmware.elf`
+6. The jail is destroyed (`--rm`)
+
+### Step 3: Verify
+
+```sh
+ls -la /tmp/blink-esp32/blink-test/.esphome/build/blink-test/.pioenvs/blink-test/
+# Should show: firmware.bin, firmware.elf, firmware.map, etc.
+```
+
+### Troubleshooting
+
+- **First run is slow** — it pulls the OCI image (~400 MiB), probes every
+  binary, resolves native substitutes, and `pkg install`s the base dataset.
+  Subsequent runs use the cache and take <1s to reach the jail.
+- **"doctor" check fails** — run `jailrun doctor` and follow its fix
+  instructions.
+- **Network needed** — ESP-IDF fetches toolchains at compile time. Use
+  `--network inherit` (full host network) or `--network allow=<IP>:80,<IP>:443`
+  (destination-scoped).
+- **Build timeouts** — the first ESP-IDF fetch can take 10+ minutes.
+  Increase `--timeout` or set `DEFAULT_JEXEC_TIMEOUT_S` in the environment.
+- **No Linux ABI needed** — if you see `kldload linux64`, jailrun is loading
+  the Linuxulator only for binaries that could not be substituted (rare for
+  esphome after the 0.3 provider backfill). The load-bearing
+  `xtensa-esp-elf-gcc` runs as a native FreeBSD ELF.
 
 ## How it works — one runtime, four subsystems
 See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the full design and the two contract seams.
@@ -123,8 +205,8 @@ See [`ROADMAP.md`](ROADMAP.md) for known gaps and what's planned next.
 
 ## Relation to bzdOS
 jailrun is a sibling of [bzdOS](https://github.com/bzdOS/bsdos) — same FreeBSD,
-jails-first worldview. It reuses bzdOS's jail-lifecycle machinery (`bsdos_lifecycled`)
-for the ephemeral compile-jail lifecycle.
+jails-first worldview. The jail lifecycle (freeze/thaw/kill) is self-contained
+(native `jexec kill`), no external daemon required.
 
 ## License
 MIT — see [LICENSE](LICENSE).

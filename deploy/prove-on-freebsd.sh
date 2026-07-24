@@ -45,6 +45,7 @@
 # against esphome/esphome:stable (real ESP32 compile, see CHANGELOG.md). See
 # CHANGELOG.md "Fixed (live E2E debugging, 2026-07-19)" for every bug this
 # surfaced and fixed along the way.
+# END_HELP
 
 set -eu
 
@@ -73,7 +74,7 @@ while [ $# -gt 0 ]; do
         --skip-bakery) SKIP_BAKERY=1; shift ;;
         --skip-runtime)SKIP_RUNTIME=1; shift ;;
         -h|--help)
-            sed -n '2,/^# UNVERIFIED/p' "$0" | grep '^#' | sed 's/^# \{0,1\}//'
+            sed -n '2,/^# END_HELP/p' "$0" | grep '^#' | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *) echo "Unknown argument: $1" >&2; exit 1 ;;
@@ -106,7 +107,7 @@ log "IMAGE_REF             : ${IMAGE_REF}"
 log "JAILRUN_SRC           : ${JAILRUN_SRC}"
 log "KEEP                  : ${KEEP}"
 
-[ -d "${JAILRUN_SRC}" ] || die "Source not found at ${JAILRUN_SRC}. Is the 9p mount up? (mount -t virtfs jailrun /mnt/jailrun -o trans=virtio,version=9p2000.L)"   # UNVERIFIED
+[ -d "${JAILRUN_SRC}" ] || die "Source not found at ${JAILRUN_SRC}. Is the 9p mount up? (mount -t virtfs jailrun /mnt/jailrun -o trans=virtio,version=9p2000.L)"
 
 # ---------------------------------------------------------------------------
 # Scratch variables (shared across steps)
@@ -137,7 +138,7 @@ s = Store(oci_cache_dir="${OCI_CACHE}", mountpoint_base="${MOUNTBASE}")
 image_id = s.resolve("${IMAGE_REF}")
 print(image_id)
 PYEOF
-)   # UNVERIFIED: skopeo --override-os linux on FreeBSD
+)
 
 [ -n "${IMAGE_ID}" ] || die "resolve returned empty image_id"
 ok "image_id=${IMAGE_ID}"
@@ -161,7 +162,7 @@ s = Store(oci_cache_dir="${OCI_CACHE}", mountpoint_base="${MOUNTBASE}")
 snap = s.unpack("${IMAGE_ID}")
 print(snap)
 PYEOF
-)   # UNVERIFIED: zfs create / umoci raw unpack on FreeBSD
+)
 
 [ -n "${SNAP_ID}" ] || die "unpack returned empty snapshot_id"
 ok "snapshot_id=${SNAP_ID}"
@@ -175,7 +176,7 @@ else
     ROOTFS_CHECK="${SNAP_ID}"
 fi
 log "Rootfs top-level at ${ROOTFS_CHECK}:"
-ls "${ROOTFS_CHECK}" || die "rootfs is empty or inaccessible"   # UNVERIFIED
+ls "${ROOTFS_CHECK}" || die "rootfs is empty or inaccessible"
 # END_STORE_UNPACK
 
 # ---------------------------------------------------------------------------
@@ -206,7 +207,7 @@ with open("${CLONE_HANDLE_FILE}", "w") as f:
     json.dump(data, f)
 print(handle.rootfs)
 PYEOF
-)   # UNVERIFIED: zfs clone on FreeBSD
+)
 
 [ -n "${CLONE_ROOTFS}" ] || die "clone returned empty rootfs path"
 ok "clone rootfs=${CLONE_ROOTFS}"
@@ -215,7 +216,7 @@ log "Handle saved to ${CLONE_HANDLE_FILE}"
 # Verify clone is writable
 WRITE_TEST="${CLONE_ROOTFS}/.jailrun_prove_write_test"
 echo "prove-on-freebsd" > "${WRITE_TEST}" && rm "${WRITE_TEST}" \
-    || die "clone rootfs is not writable"   # UNVERIFIED
+    || die "clone rootfs is not writable"
 ok "write test passed"
 # END_STORE_CLONE
 
@@ -230,7 +231,7 @@ RESOLV_DEST="${CLONE_ROOTFS}/etc/resolv.conf"
 if [ -f "${RESOLV_DEST}" ]; then
     log "Binding /etc/resolv.conf -> ${RESOLV_DEST} (ro)"
     mount_nullfs -o ro /etc/resolv.conf "${RESOLV_DEST}" \
-        || log "WARN: nullfs file bind failed — known open question"   # UNVERIFIED
+        || log "WARN: nullfs file bind failed — known open question"
 else
     log "WARN: ${RESOLV_DEST} does not exist in rootfs, skipping file bind"
 fi
@@ -242,7 +243,7 @@ WORK_DEST="${CLONE_ROOTFS}/mnt/work"
 mkdir -p "${WORK_DEST}"
 log "Binding ${WORK_DIR} -> ${WORK_DEST} (rw)"
 mount_nullfs "${WORK_DIR}" "${WORK_DEST}" \
-    || die "nullfs dir bind failed"   # UNVERIFIED
+    || die "nullfs dir bind failed"
 ok "nullfs bind mounted"
 # END_NULLFS_MOUNT
 
@@ -373,8 +374,8 @@ fi
 step "S3-E: store.destroy — tear down clone"
 
 # Unmount nullfs in reverse order first
-umount "${WORK_DEST}"            2>/dev/null || log "WARN: umount ${WORK_DEST} failed"   # UNVERIFIED
-umount "${RESOLV_DEST}"          2>/dev/null || log "WARN: umount ${RESOLV_DEST} failed — was it mounted?"   # UNVERIFIED
+umount "${WORK_DEST}"            2>/dev/null || log "WARN: umount ${WORK_DEST} failed"
+umount "${RESOLV_DEST}"          2>/dev/null || log "WARN: umount ${RESOLV_DEST} failed — was it mounted?"
 
 if [ "${KEEP}" -eq 1 ]; then
     log "--keep: skipping destroy.  Clone at: ${CLONE_ROOTFS}"
@@ -408,7 +409,7 @@ handle = Handle(
 s.destroy(handle)
 print(f"[prove] destroyed handle {handle.id}")
 PYEOF
-    # UNVERIFIED: zfs destroy on FreeBSD
+
     ok "clone destroyed"
     rm -f "${CLONE_HANDLE_FILE}"
 fi

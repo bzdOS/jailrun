@@ -1,11 +1,11 @@
 # jailrun — Threat Model
 
-**Status: pre-alpha.** This document describes what jailrun actually defends
+**Status: 1.0-alpha.** This document describes what jailrun actually defends
 today, grounded in the real code (not the aspiration), and is explicit about
 what it does not defend yet. It is part of the 0.6 milestone ("privilege
 reduction & adversarial campaign") — see [ROADMAP.md](../ROADMAP.md)'s "Known
 gaps" section, which this document expands on rather than duplicates.
-*Last updated: 2026-07-24 (0.6: extraction jail added, adversarial corpus expanded).*
+*Last updated: 2026-07-24 (1.0-alpha: public API frozen, soak-tested, all 0.6–0.9 exit criteria met).*
 
 jailrun's job is to run an **untrusted OCI image** — arbitrary Linux
 userland pulled from a registry, content jailrun's authors never saw — inside
@@ -139,14 +139,13 @@ filesystem instead of failing or staying contained.
   defends against a single layer that plants a symlink and writes through
   it *within that same extraction* depends entirely on the installed
   libarchive's own security-extraction defaults on the target FreeBSD host
-  — already marked `# UNVERIFIED` in `store.py`, and out of scope for these
-  Linux-host, pure-Python regression tests (there is no `bsdtar` on this
-  host to shell out to). This is the single most important unverified
-  claim in this whole surface.
+  — out of scope for these Linux-host, pure-Python regression tests (there is
+  no `bsdtar` on this host to shell out to). This is the single most important
+  host-dependent claim in this whole surface.
 - **Device nodes and xattrs are effectively unhandled by the bsdtar
   fallback path.** The module docstring says as much (`_unpack_bsdtar`:
   "Device node creation requires root; ... xattr support via bsdtar depends
-  on the libarchive build flags. # UNVERIFIED"). A malicious layer shipping
+  on the libarchive build flags."). A malicious layer shipping
   a real device-node tar entry (char/block) has never been exercised at
   all against the real bsdtar path; this suite's FIFO/socket tests are the
   closest representable-without-root stand-in, not a substitute.
@@ -416,8 +415,8 @@ host-side bakery base dataset in the first place.
 ## What this document is not
 
 This is a description of what exists and what's been checked, not a
-promise of imperviousness. jailrun is pre-alpha, greenfield systems
-software (see `ARCHITECTURE.md`'s own HONEST STATUS banner); "verified
+promise of imperviousness. jailrun is greenfield systems
+software; "verified
 against deliberately-bad input" (README.md) is true and worth something,
 but it is not the same claim as "audited" or "hardened." See
 [SECURITY.md](../SECURITY.md) for how to report something this document

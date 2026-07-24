@@ -13,7 +13,7 @@
 #    jexec propagates the exact inner returncode, which is required for smoke validation
 # END_RATIONALE
 # END_AI_HEADER
-# UNVERIFIED — freebsd-host-only end-to-end smoke test for jailrun S1 runtime.
+
 #
 # Run this script on freebsd-host (FreeBSD, ZFS, Linuxulator available).
 # It exercises the run lifecycle by hand for one image (alpine echo hi,
@@ -31,7 +31,7 @@
 # All steps are idempotent; re-run freely.
 
 set -eu
-JAILRUN_POOL="zroot/jailrun"         # UNVERIFIED — adjust to your pool name
+JAILRUN_POOL="zroot/jailrun"
 IMAGE="alpine:3.19"
 IMAGE_SLUG="alpine-3.19"
 JAIL_NAME="jailrun-smoke-$$"
@@ -48,7 +48,7 @@ log "Step 1: pull $IMAGE (skopeo)"
 OCI_DIR="/tmp/jailrun-oci-${IMAGE_SLUG}"
 if [ ! -d "$OCI_DIR" ]; then
     skopeo copy "docker://$IMAGE" "oci:${OCI_DIR}:latest" \
-        || die "skopeo pull failed"                          # UNVERIFIED
+        || die "skopeo pull failed"
 fi
 log "OCI layout: $OCI_DIR"
 # END_PULL_IMAGE
@@ -61,13 +61,13 @@ DATASET="${JAILRUN_POOL}/images/${IMAGE_SLUG}"
 ROOTFS="/$(echo "$DATASET" | tr '/' '/')"  # zfs mount point
 
 if ! zfs list "$DATASET" >/dev/null 2>&1; then
-    zfs create -p "$DATASET"                                 # UNVERIFIED
+    zfs create -p "$DATASET"
     # umoci unpack into the new dataset.
     # Adjust tag ('latest') to match what skopeo wrote.
     umoci unpack --image "${OCI_DIR}:latest" --rootless \
-        "$ROOTFS"                                            # UNVERIFIED
+        "$ROOTFS"
     # Remove umoci's config/manifest sidecar dirs (optional).
-    zfs snapshot "${DATASET}@image"                          # UNVERIFIED
+    zfs snapshot "${DATASET}@image"
     log "snapshot: ${DATASET}@image"
 else
     log "dataset already exists: $DATASET"
@@ -79,7 +79,7 @@ fi
 # ---------------------------------------------------------------------------
 log "Step 3: clone → writable rootfs"
 RUN_DATASET="${JAILRUN_POOL}/runs/${JAIL_NAME}"
-zfs clone "${DATASET}@image" "$RUN_DATASET"                 # UNVERIFIED
+zfs clone "${DATASET}@image" "$RUN_DATASET"
 # zfs sets the mountpoint automatically; retrieve it.
 ROOTFS_PATH="$(zfs get -H -o value mountpoint "$RUN_DATASET")"
 log "rootfs: $ROOTFS_PATH"
@@ -98,7 +98,7 @@ ${JAIL_NAME} {
     mount.devfs;
 }
 JAILCONF
-# UNVERIFIED — mount.devfs requires devfs ruleset on freebsd-host; may need:
+
 #   devfs_ruleset = "4";   (FreeBSD 13+)
 cat "$CONF_FILE"
 # END_WRITE_JAILCONF
@@ -107,7 +107,7 @@ cat "$CONF_FILE"
 # Step 5: start the jail
 # ---------------------------------------------------------------------------
 log "Step 5: jail -c"
-jail -f "$CONF_FILE" -c "$JAIL_NAME"                        # UNVERIFIED
+jail -f "$CONF_FILE" -c "$JAIL_NAME"
 log "jail $JAIL_NAME created"
 # END_JAIL_RUN
 
@@ -117,7 +117,7 @@ log "jail $JAIL_NAME created"
 #          jexec propagates the exact inner returncode.
 # ---------------------------------------------------------------------------
 log "Step 6: jexec echo hi"
-jexec "$JAIL_NAME" /bin/echo hi                             # UNVERIFIED
+jexec "$JAIL_NAME" /bin/echo hi
 RC=$?
 log "exit code: $RC"
 [ "$RC" -eq 0 ] || die "expected exit code 0, got $RC"
@@ -127,8 +127,8 @@ log "exit code: $RC"
 # Step 7: stop jail + destroy clone (--rm equivalent)
 # ---------------------------------------------------------------------------
 log "Step 7: jail -r + zfs destroy"
-jail -r "$JAIL_NAME" || true                                # UNVERIFIED
-zfs destroy "$RUN_DATASET"                                  # UNVERIFIED
+jail -r "$JAIL_NAME" || true
+zfs destroy "$RUN_DATASET"
 rm -f "$CONF_FILE"
 log "cleanup done"
 # END_DESTROY_JAIL

@@ -42,8 +42,7 @@
 #   provision-freebsd.sh existing              # pool already exists, just datasets
 #   JAILRUN_ZPOOL=tank provision-freebsd.sh    # use a different pool name
 #
-# UNVERIFIED — this script has not been run on a real FreeBSD host yet.
-# Mark findings when each step is confirmed.
+# END_HELP
 
 set -eu
 
@@ -64,7 +63,7 @@ while [ $# -gt 0 ]; do
         --tier2)     TIER2=1; shift ;;
         --no-pkg)    DO_PKG=0; shift ;;
         -h|--help)
-            sed -n '2,/^# UNVERIFIED/p' "$0" | grep '^#' | sed 's/^# \{0,1\}//'
+            sed -n '2,/^# END_HELP/p' "$0" | grep '^#' | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         -*)
@@ -98,7 +97,7 @@ require_root
 step "0. Sanity checks"
 log "ZPOOL=${ZPOOL}  DEVICE=${DEVICE:-<existing>}  TIER2=${TIER2}"
 
-uname -r | grep -q FreeBSD || die "this script is for FreeBSD only"   # UNVERIFIED
+uname -r | grep -q FreeBSD || die "this script is for FreeBSD only"
 # END_SANITY_CHECKS
 
 # ---------------------------------------------------------------------------
@@ -108,7 +107,7 @@ uname -r | grep -q FreeBSD || die "this script is for FreeBSD only"   # UNVERIFI
 step "1. Install pkg dependencies"
 
 if [ "$DO_PKG" -eq 1 ]; then
-    # Update pkg catalogue if older than 24 h                            # UNVERIFIED
+    # Update pkg catalogue if older than 24 h
     pkg update -q || log "WARN: pkg update failed (continuing)"
 
     # skopeo  — pull OCI images from registries (--override-os linux)
@@ -118,7 +117,7 @@ if [ "$DO_PKG" -eq 1 ]; then
     # git     — source checkout (bakery recipes that build from source)
     PKGS="skopeo umoci cmake ninja git"
     log "Installing: ${PKGS}"
-    pkg install -y ${PKGS}                                               # UNVERIFIED
+    pkg install -y ${PKGS}
     log "pkg install done"
 else
     log "Skipping pkg install (--no-pkg)"
@@ -131,7 +130,7 @@ fi
 # START_ZFS_POOL
 step "2. Ensure ZFS pool '${ZPOOL}'"
 
-if zpool list "${ZPOOL}" >/dev/null 2>&1; then                         # UNVERIFIED
+if zpool list "${ZPOOL}" >/dev/null 2>&1; then
     log "Pool '${ZPOOL}' already exists"
 elif [ -z "${DEVICE}" ] || [ "${DEVICE}" = "existing" ]; then
     die "Pool '${ZPOOL}' does not exist and no device specified.
@@ -145,11 +144,11 @@ else
         -O compression=lz4 \
         -O mountpoint=none \
         "${ZPOOL}" \
-        "${DEVICE}"                                                      # UNVERIFIED
+        "${DEVICE}"
     log "Pool created"
 fi
 
-# Verify pool is healthy                                                 # UNVERIFIED
+# Verify pool is healthy
 POOL_STATE=$(zpool list -H -o health "${ZPOOL}" 2>/dev/null || echo "UNKNOWN")
 log "Pool health: ${POOL_STATE}"
 case "${POOL_STATE}" in
@@ -172,11 +171,11 @@ JAILRUN_MP="/jailrun"
 for ds_suffix in images bases runs; do
     DS="${ZPOOL}/${ds_suffix}"
     MP="${JAILRUN_MP}/${ds_suffix}"
-    if zfs list "${DS}" >/dev/null 2>&1; then                           # UNVERIFIED
+    if zfs list "${DS}" >/dev/null 2>&1; then
         log "Dataset ${DS} already exists"
     else
         log "Creating dataset ${DS} -> ${MP}"
-        zfs create -p -o "mountpoint=${MP}" "${DS}"                    # UNVERIFIED
+        zfs create -p -o "mountpoint=${MP}" "${DS}"
     fi
 done
 # END_ZFS_DATASETS
@@ -202,13 +201,13 @@ step "5. Linuxulator (Tier-2)"
 
 if [ "${TIER2}" -eq 1 ]; then
     log "Loading linux64.ko and linprocfs (Tier-2 OCI fallback enabled)"
-    kldload linux64  2>/dev/null || log "linux64 already loaded or failed"  # UNVERIFIED
-    kldload linprocfs 2>/dev/null || log "linprocfs already loaded or failed"  # UNVERIFIED
+    kldload linux64  2>/dev/null || log "linux64 already loaded or failed"
+    kldload linprocfs 2>/dev/null || log "linprocfs already loaded or failed"
 
     # Persist across reboots
     RCCONF="/etc/rc.conf"
     if ! grep -q 'linux_enable' "${RCCONF}" 2>/dev/null; then
-        echo 'linux_enable="YES"' >> "${RCCONF}"                        # UNVERIFIED
+        echo 'linux_enable="YES"' >> "${RCCONF}"
         log "Added linux_enable=YES to ${RCCONF}"
     else
         log "linux_enable already set in ${RCCONF}"

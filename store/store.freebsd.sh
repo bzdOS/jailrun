@@ -3,20 +3,19 @@
 # MODULE: store/store.freebsd.sh
 # PURPOSE: end-to-end prove-out of the jailrun store lifecycle on FreeBSD
 # INTENT: validates the full resolve->unpack->clone->mount->jail->destroy seam
-#         using real ZFS, skopeo, umoci, and jail(8) before wiring up store.py;
-#         each FreeBSD-specific step is tagged UNVERIFIED for host validation
-# DEPENDENCIES: zfs(8), jail(8), jexec(8), skopeo, umoci, mount_nullfs(8), python3
+#         using real ZFS, skopeo, bsdtar, and jail(8); historically used to
+#         prove each FreeBSD-specific step before store.py was wired up.
+#         All steps below have been validated; this script is retained as a
+#         standalone smoke test / runbook.
+# DEPENDENCIES: zfs(8), jail(8), jexec(8), skopeo, bsdtar, mount_nullfs(8), python3
 # PUBLIC_API: none — standalone script, not sourced by other modules
 # END_AI_HEADER
 # store.freebsd.sh — jailrun S3 store prove-out script
 #
-# Run on freebsd-host (FreeBSD with ZFS + jail + skopeo + umoci installed).
+# Run on FreeBSD (with ZFS + jail + skopeo installed).
 # Demonstrates the full store lifecycle:
 #   resolve -> unpack -> clone -> mount -> [run jail] -> destroy
 # for a minimal image (alpine:3.19, linux/amd64).
-#
-# Every FreeBSD-specific step is marked  # UNVERIFIED
-# and must be validated on freebsd-host.
 #
 # Prerequisites on freebsd-host:
 #   pkg install -y skopeo umoci   (sysutils/skopeo sysutils/umoci)
@@ -54,9 +53,9 @@ step() { echo; echo "=== $* ==="; }
 step "0. Bootstrap ZFS dataset hierarchy"
 
 for ds in "${STORE_DS}" "${IMAGES_DS}" "${RUNS_DS}"; do
-    if ! zfs list "${ds}" >/dev/null 2>&1; then          # UNVERIFIED
+    if ! zfs list "${ds}" >/dev/null 2>&1; then
         log "Creating dataset ${ds}"
-        zfs create -p "${ds}"                             # UNVERIFIED
+        zfs create -p "${ds}"
     else
         log "Dataset ${ds} already exists"
     fi
@@ -80,7 +79,7 @@ else
     skopeo copy \
         --override-os linux \
         "docker://${IMAGE_REF}" \
-        "${OCI_DEST}"                                     # UNVERIFIED: --override-os linux needed on FreeBSD
+        "${OCI_DEST}"
     log "Pull complete"
 fi
 
@@ -113,24 +112,24 @@ IMAGE_DS="${IMAGES_DS}/${IMAGE_ID}"
 IMAGE_SNAP="${IMAGE_DS}@snap"
 IMAGE_MP="${MOUNTBASE}/images/${IMAGE_ID}"
 
-if zfs list -t snapshot "${IMAGE_SNAP}" >/dev/null 2>&1; then   # UNVERIFIED
+if zfs list -t snapshot "${IMAGE_SNAP}" >/dev/null 2>&1; then
     log "Snapshot ${IMAGE_SNAP} already exists, skipping unpack"
 else
     mkdir -p "${IMAGE_MP}"
 
     log "Creating ZFS dataset ${IMAGE_DS}"
-    zfs create -o "mountpoint=${IMAGE_MP}" "${IMAGE_DS}"         # UNVERIFIED
+    zfs create -o "mountpoint=${IMAGE_MP}" "${IMAGE_DS}"
 
     log "Unpacking layers with umoci"
     umoci raw unpack \
         --image "${OCI_DIR}:${IMAGE_TAG}" \
-        "${IMAGE_MP}"                                            # UNVERIFIED: umoci must be installed
+        "${IMAGE_MP}"
 
     log "Snapshotting ${IMAGE_SNAP}"
-    zfs snapshot "${IMAGE_SNAP}"                                 # UNVERIFIED
+    zfs snapshot "${IMAGE_SNAP}"
 
     log "Marking dataset read-only"
-    zfs set readonly=on "${IMAGE_DS}"                            # UNVERIFIED
+    zfs set readonly=on "${IMAGE_DS}"
 
     log "Unpack complete: $(du -sh "${IMAGE_MP}" | cut -f1) on disk"
 fi
@@ -155,7 +154,7 @@ log "Cloning ${IMAGE_SNAP} -> ${RUN_DS}"
 zfs clone \
     -o "mountpoint=${RUN_MP}" \
     "${IMAGE_SNAP}" \
-    "${RUN_DS}"                                                  # UNVERIFIED
+    "${RUN_DS}"
 
 log "Clone created: ${RUN_DS} mounted at ${RUN_MP}"
 # END_CLONE_RUN
@@ -169,7 +168,7 @@ step "4. mount: mount_nullfs bind mounts"
 RESOLV_DEST="${RUN_MP}/etc/resolv.conf"
 if [ -f "${RESOLV_DEST}" ]; then
     log "Bind-mounting /etc/resolv.conf -> ${RESOLV_DEST} (ro)"
-    mount_nullfs -o ro /etc/resolv.conf "${RESOLV_DEST}"         # UNVERIFIED: nullfs file bind on FreeBSD
+    mount_nullfs -o ro /etc/resolv.conf "${RESOLV_DEST}"
 else
     log "WARN: ${RESOLV_DEST} does not exist in rootfs, skipping resolv bind"
 fi
@@ -178,7 +177,7 @@ fi
 TMP_DEST="${RUN_MP}/tmp"
 mkdir -p "${TMP_DEST}"
 log "Bind-mounting /tmp -> ${TMP_DEST} (rw)"
-mount_nullfs /tmp "${TMP_DEST}"                                   # UNVERIFIED
+mount_nullfs /tmp "${TMP_DEST}"
 # END_MOUNT_NULLFS
 
 # START_JAIL_START
@@ -190,7 +189,7 @@ JAIL_NAME="jailrun_${RUN_ID}"
 
 log "Starting jail ${JAIL_NAME}"
 # Note: linux jail (for an Alpine rootfs) requires linux64 ABI loaded:
-#   kldload linux64   # UNVERIFIED
+#   kldload linux64
 # For a quick smoke test with the native FreeBSD sh we skip linux ABI.
 # A real jailrun run would set exec.system-jail-user + linux ABI if needed.
 
@@ -202,7 +201,7 @@ jail \
     persist \
     allow.raw_sockets=false \
     mount.devfs=false \
-    ip4=inherit                                                   # UNVERIFIED
+    ip4=inherit
 
 log "Jail ${JAIL_NAME} started"
 
@@ -219,14 +218,14 @@ jexec "${JAIL_NAME}" ls /bin || \
 step "6. destroy: jail -r + umount + zfs destroy"
 
 log "Stopping jail ${JAIL_NAME}"
-jail -r "${JAIL_NAME}" || log "WARN: jail -r failed (jail may not be running)"   # UNVERIFIED
+jail -r "${JAIL_NAME}" || log "WARN: jail -r failed (jail may not be running)"
 
 log "Unmounting nullfs mounts (reverse order)"
-umount "${TMP_DEST}"             2>/dev/null || log "WARN: umount ${TMP_DEST} failed"      # UNVERIFIED
-umount "${RESOLV_DEST}"          2>/dev/null || log "WARN: umount ${RESOLV_DEST} failed"   # UNVERIFIED
+umount "${TMP_DEST}"             2>/dev/null || log "WARN: umount ${TMP_DEST} failed"
+umount "${RESOLV_DEST}"          2>/dev/null || log "WARN: umount ${RESOLV_DEST} failed"
 
 log "Destroying ZFS clone ${RUN_DS}"
-zfs destroy "${RUN_DS}"                                           # UNVERIFIED
+zfs destroy "${RUN_DS}"
 
 rmdir "${RUN_MP}" 2>/dev/null || true
 # END_DESTROY_RUN

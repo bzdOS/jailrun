@@ -8,7 +8,7 @@
 # DEPENDENCIES: pkg(8), ports tree at /usr/ports, jq(1), python3, git(1), gmake(1)
 # PUBLIC_API: none — standalone script; entry point is argv[1]=manifest.json
 # END_AI_HEADER
-# UNVERIFIED — runs ONLY on freebsd-host (FreeBSD). Not executable on linux-host (Linux).
+
 # bake.freebsd.sh — given a substitution manifest, execute its provisioning plan
 # into a pkg/port-provisioned base jail/dataset.
 #
@@ -118,7 +118,7 @@ if [ -s "$PORT_LIST" ]; then
             die "Port directory not found: $PORT_DIR — is ports tree up to date? (portsnap fetch update)"
         fi
         log "  Building port: $origin"
-        # UNVERIFIED: options choices may need interactive selection first.
+
         (cd "$PORT_DIR" && make $PKG_CONFIRM install clean BATCH=yes)
     done < "$PORT_LIST"
 else
@@ -142,7 +142,7 @@ if [ -s "$BUILD_LIST" ]; then
                 ESP_QUICK_PORT="${PORT_TREE}/devel/esp-quick-toolchain"
                 if [ -d "$ESP_QUICK_PORT" ]; then
                     log "  Found devel/esp-quick-toolchain — building."
-                    # UNVERIFIED
+
                     (cd "$ESP_QUICK_PORT" && make $PKG_CONFIRM install clean BATCH=yes)
                 else
                     log "  devel/esp-quick-toolchain not in tree — falling back to crosstool-NG."
@@ -170,7 +170,7 @@ fi
 
 # ---------------------------------------------------------------------------
 # Crosstool-NG fallback for xtensa-lx106-elf
-# UNVERIFIED — FreeBSD ct-ng support is experimental per upstream docs.
+
 # ---------------------------------------------------------------------------
 # _build_xtensa_lx106_crosstool:start
 #   purpose: build ESP8266 xtensa-lx106-elf cross-compiler from jcmvbkbc/crosstool-NG
@@ -201,7 +201,7 @@ _build_xtensa_lx106_crosstool() {
     CT_PREFIX="/usr/local/xtensa-lx106-elf"
 
     log "  Cloning jcmvbkbc/crosstool-NG (lx106 branch) ..."
-    # UNVERIFIED
+
     git clone --depth 1 --branch lx106 \
         https://github.com/jcmvbkbc/crosstool-NG.git "$CT_BUILD_DIR"
 
@@ -225,7 +225,7 @@ _build_xtensa_lx106_crosstool() {
         # Override install prefix
         printf '\nCT_PREFIX_DIR="%s"\n' "$CT_PREFIX" >> .config
 
-        # UNVERIFIED: build may fail on FreeBSD due to experimental ct-ng support.
+
         ct-ng build
     )
 

@@ -165,6 +165,7 @@ EXPECTED_PKG_ARTIFACTS: dict[str, str] = {
     "python310":      "/usr/local/bin/python3.10",
     "gtar":           "/usr/local/bin/gtar",
     "dash":           "/usr/local/bin/dash",
+    "gnugrep":        "/usr/local/bin/grep",
     "meson":          "/usr/local/bin/meson",
     "scons-py312":    "/usr/local/bin/scons",
     "zsh":            "/usr/local/bin/zsh",
@@ -176,6 +177,7 @@ EXPECTED_PKG_ARTIFACTS: dict[str, str] = {
     "php83":          "/usr/local/bin/php",
     "py311-pip":      "/usr/local/bin/pip",
     "openjdk21":      "/usr/local/openjdk21/bin/java",
+    "py312-uv":       "/usr/local/bin/uv",
 }
 
 EXPECTED_PORT_ARTIFACTS: dict[str, str] = {
@@ -212,7 +214,7 @@ def test_provider_map_round_trips_exactly():
 #           to bakery/bakery.py's former PKG_ARTIFACTS.
 def test_pkg_artifacts_round_trips_exactly():
     assert isinstance(PKG_ARTIFACTS, dict)
-    assert len(PKG_ARTIFACTS) == 38 == len(EXPECTED_PKG_ARTIFACTS)
+    assert len(PKG_ARTIFACTS) == 40 == len(EXPECTED_PKG_ARTIFACTS)
     assert PKG_ARTIFACTS == EXPECTED_PKG_ARTIFACTS
 
 

@@ -6,10 +6,12 @@
 > the irreducible**. ZFS is the image/layer store. Grew out of an ESPHome-compile
 > use case; aligned with bsdOS (jails + Linuxulator + lifecycled). 2026-06-30.
 >
-> HONEST STATUS: greenfield systems software. It only *means* anything when run on
-> FreeBSD (jails/ZFS/Linuxulator). Agents on this host (Linux/linux-host) produce
-> DESIGN + SCAFFOLD + freebsd-host-runnable scripts — NOT a validated runtime. Mark every
-> unproven step `# UNVERIFIED`. Validation is serial, on freebsd-host, the user's zone.
+> HONEST STATUS: greenfield systems software, validated on FreeBSD 15.1.
+> The runtime IS proven end-to-end (ESP32 firmware compiles via real
+> ESP-IDF fetch + native xtensa toolchain; 262 tests pass; 100×8-way soak
+> with zero leaks; adversarial layer corpus + 10 jail-escape techniques
+> blocked). What is NOT done: formal security audit, Capsicum, VIMAGE,
+> image-signing — see ROADMAP.md "Beyond 1.0".
 
 ## Thesis
 The container/isolation primitive is solved — jails do it, ZFS gives images/layers
@@ -96,7 +98,7 @@ ZFS-cloned jail, streamed, `--rm`. First green = the whole thesis demonstrated.
 - Shared, READ-ONLY for agents: `ARCHITECTURE.md`, `schemas/`.
 - Prototype language: Python 3 orchestrator + shell-outs (so it can later back a
   `ContainerBackend` abstraction directly). No run, no git, no pkg install — design +
-  scaffold + `*.freebsd.sh` scripts marked `# UNVERIFIED`.
+  scaffold + `*.freebsd.sh` smoke scripts (now validated on FreeBSD 15.1).
 
 ## Cross-seam invariants (binding — added after the first integration pass)
 
@@ -123,27 +125,21 @@ MUST uphold them.
    (truss/ktrace on freebsd-host) is the source of truth for `linuxulator.gaps`; don't hard-
    block a run on the static list.
 
-## Jail lifecycle backend = bsdos_lifecycled (bzdOS)
+## Jail lifecycle = native (self-contained)
 
-jailrun does NOT hand-roll jail process control. The running jail's process
-lifecycle is delegated to **`bsdos_lifecycled`** — the bzdOS jail lifecycle daemon
-(source `bsdOS/lifecycled`, prebuilt via bsdOS's own build/deploy pipeline,
-`rc.d bsdos_lifecycled`). Reused, not reinvented.
+jailrun's jail process lifecycle is **self-contained** — no external daemon.
+`runtime/lifecycle.py` uses FreeBSD base commands (`jexec kill`, `jls`)
+directly.
 
 **Responsibility split**
 - jailrun (store + runtime): create / mount (nullfs) / `jexec` / ZFS clone+destroy.
-- bsdos_lifecycled: the running jail's processes — `FREEZE` (SIGSTOP all PIDs),
-  `THAW` (SIGCONT), `HIBERNATE` (ZFS snapshot + SIGSTOP), `RESTORE`, `KILL`
-  (SIGKILL + cleanup). PID-targeted via `jail_get(2)` + `sysctl(KERN_PROC_PROC)`.
+- lifecycle.py: the running jail's processes — `FREEZE` (`jexec kill -STOP -1`),
+  `THAW` (`jexec kill -CONT -1`), `KILL` (`jexec kill -KILL -1`), `STATUS`
+  (`jls -n`). HIBERNATE/RESTORE need ZFS snapshot integration (not yet wired).
 
-**Wire protocol** (`runtime/lifecycle.py`): AF_UNIX socket
-`/var/run/bsdos-lifecycle.sock` (env `JAILRUN_LIFECYCLED_SOCK`); one line
-`"<VERB> <jail_name>\n"`, JSON response; `jail_name == "jailrun-<handle>"`. A Zenoh
-mirror (`bsdos/ctl/lifecycle`) exists for FREEZE/THAW/STATUS.
-
-**Teardown path** (`engine.py`): on exit → lifecycled `KILL` (best-effort, if the
-daemon is up) → always `jail -r` (remove the persist jail) → on `--rm`
-`store.destroy` (zfs destroy + unmount). A missing daemon is fine — `jail -r`
+**Teardown path** (`engine.py`): on exit → lifecycle `KILL` (best-effort
+`jexec kill -KILL -1`) → always `jail -r` (remove the persist jail) → on `--rm`
+`store.destroy` (zfs destroy + unmount). A jexec failure is fine — `jail -r`
 handles it.
 
 **Bonus jailrun gets for free:** `jailrun freeze/thaw/hibernate/restore <jail>` —

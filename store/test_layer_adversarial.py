@@ -47,8 +47,8 @@ invocation itself (raw extraction of a layer .tar.gz into a fresh temp dir, BEFO
 _merge_tree ever runs) is a separate, real trust boundary this file deliberately does NOT
 exercise: whether libbsdtar's own extraction defends against a layer that plants a symlink
 and then writes through it INSIDE THAT SAME EXTRACTION depends on the installed
-libarchive's security-extraction defaults, which is host-specific and already marked
-`# UNVERIFIED` in store.py. See docs/THREAT-MODEL.md surface (a) for the honest framing.
+libarchive's security-extraction defaults, which is host-specific. See
+docs/THREAT-MODEL.md surface (a) for the honest framing.
 
 Run on host (no FreeBSD required):
     python3 -m pytest store/test_layer_adversarial.py -v

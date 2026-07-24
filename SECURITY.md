@@ -1,21 +1,20 @@
 # Security Policy
 
-## Status: pre-alpha
+## Status: 1.0-alpha
 
-jailrun is greenfield systems software (see `ARCHITECTURE.md`'s HONEST
-STATUS banner). It runs untrusted OCI image content — including a layer
-*unpack* step that runs as root on the host — inside FreeBSD jails, and it
-has **not** had a formal security audit. Sandbox hardening (network
-default-deny, `rctl` limits, timeouts, the two fixed symlink-escape bugs)
-is verified against deliberately-bad input during development, which is not
-the same claim as "audited." See [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md)
+jailrun is greenfield systems software. It runs untrusted OCI image content —
+including a layer *unpack* step that runs as root on the host — inside FreeBSD
+jails, and it has **not** had a formal security audit. Sandbox hardening
+(network default-deny, `rctl` limits, timeouts, the two fixed symlink-escape
+bugs) is verified against deliberately-bad input during development, which is
+not the same claim as "audited." See [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md)
 for the honest, current breakdown of what's defended, how, and what isn't
 yet — read that first if you're deciding whether something you found is
 already a known, documented gap.
 
 Given that status, please report security issues even if you're unsure
 whether they're "real" — a false positive costs us little; a missed report
-in pre-alpha software costs a lot more once it's depended on.
+costs a lot more once it's depended on.
 
 ## Reporting a vulnerability
 
@@ -58,7 +57,7 @@ Please include, as applicable:
 - Supply-chain issues in the pull path (e.g. something that would make
   `resolve()` accept content it shouldn't).
 
-**Out of scope (for now, given pre-alpha status — but tell us anyway if
+**Out of scope (for now — but tell us anyway if
 you're unsure):**
 
 - The **absence** of Capsicum, VNET-scoped networking, or image-signature
@@ -78,7 +77,7 @@ you're unsure):**
 
 ## Response expectations
 
-This is an unfunded, pre-alpha, small-maintainer project — please read
+This is an unfunded, small-maintainer project — please read
 these as good-faith targets, not SLAs:
 
 - **Acknowledgment:** best-effort within a few days.

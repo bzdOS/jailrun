@@ -189,8 +189,8 @@ applies the cleanup actions.
 Print the jailrun version (git describe), FreeBSD release, and
 Python version.
 .It Cm freeze , thaw , hibernate , restore
-Lifecycle operations delegated to
-.Nm bsdos_lifecycled .
+Lifecycle operations via native
+.Nm jexec Ns -based signal delivery.
 .Ic freeze
 SIGSTOPs a jail's processes (0% CPU, state retained in RAM).
 .Ic thaw

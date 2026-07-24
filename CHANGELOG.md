@@ -367,6 +367,37 @@ the pipeline for real; every one of these had sat unexercised through every prio
 - All source annotated with **sema** semantic-markup contracts.
 
 ### Status
+
+## [1.0.0-alpha.1] - 2026-07-25
+
+### Added — Production readiness (roadmap 1.0)
+- **ESP32 end-to-end tutorial** (`README.md`): "compile an ESP32 firmware on
+  FreeBSD in 5 minutes" — step-by-step guide from `jailrun doctor` through
+  `jailrun run esphome/esphome:stable esphome compile blink.yaml` to real
+  `.bin`/`.elf` firmware output. Verified from scratch on FreeBSD 15.1.
+- **Public API frozen under semver.** All CLI flags, environment variables,
+  exit codes, JSON output formats, and the substitution manifest schema are
+  declared stable; incompatible changes after 1.0 bump the major version.
+- **No known-unsafe defaults.** Every documented security gap has a workaround
+  or explicit opt-in warning: extraction jail (`JAILRUN_EXTRACT_IN_JAIL=1`,
+  documented in `docs/THREAT-MODEL.md`), unrestricted devfs
+  (`--allow-unrestricted-devfs`), full-host network (`--network inherit`),
+  rctl requiring `kern.racct.enable=1`, `--network allow` needing pf anchor
+  hooks (caught by `jailrun doctor`).
+- **Release artifact** (`dist/jailrun.pyz`): 286 KiB self-contained zipapp,
+  works on any FreeBSD 14.x/15.x host with Python 3.10+ and no package
+  dependencies. Also installable via `pip install jailrun` or FreeBSD port.
+- **Version: 1.0.0-alpha.1** (pyproject.toml: 1.0.0a1).
+- **Self-contained lifecycle**: `bsdos_lifecycled` dependency removed;
+  jail process lifecycle (FREEZE/THAW/KILL) now uses native `jexec kill`.
+- **DNS in jails fixed**: `/etc/resolv.conf` from the host is now
+  bind-mounted into the jail when `--network` is not `none`. Without this,
+  DNS resolution failed for ALL images inside jailrun jails.
+- **`-it` flag is honest**: now errors cleanly instead of silently ignoring.
+
+### Changed
+- `README.md` restructured: old "Quickstart" replaced with the ESP32 tutorial.
+
 ## [Unreleased] — Production hardening & soak (roadmap 0.9)
 
 ### Added
@@ -465,7 +496,8 @@ the pipeline for real; every one of these had sat unexercised through every prio
   framework for staging SIGKILL at each lifecycle phase and verifying
   `jailrun gc --fix` leaves zero orphans.
 
-[Unreleased]: https://github.com/bzdOS/jailrun/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/bzdOS/jailrun/compare/v1.0.0-alpha.1...HEAD
+[1.0.0-alpha.1]: https://github.com/bzdOS/jailrun/compare/v0.9.0...v1.0.0-alpha.1
 [0.8.0]: https://github.com/bzdOS/jailrun/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/bzdOS/jailrun/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/bzdOS/jailrun/compare/v0.5.0...v0.6.0

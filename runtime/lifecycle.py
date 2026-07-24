@@ -1,229 +1,144 @@
 # START_AI_HEADER
 # MODULE: runtime/lifecycle.py
-# PURPOSE: synchronous client for bsdos_lifecycled (bzdOS jail lifecycle daemon)
-# INTENT: jailrun delegates jail process-lifecycle (FREEZE/THAW/HIBERNATE/RESTORE/KILL/STATUS)
-#         to bsdos_lifecycled rather than hand-rolling signal delivery; this module owns
-#         the AF_UNIX IPC seam to that daemon; the jail/ZFS lifecycle remains in engine.py
-# DEPENDENCIES: stdlib (asyncio, json, logging, os, socket); external: bsdos_lifecycled
-#               Unix socket at /var/run/bsdos-lifecycle.sock (bzdOS artefact)
-# PUBLIC_API: Lifecycled (class), teardown(jail_name) (async)
+# PURPOSE: native jail process lifecycle (SIGSTOP/SIGCONT/SIGKILL via jexec)
+# INTENT: self-contained — no external daemon; uses FreeBSD jail(8) + kill(1) directly
+# DEPENDENCIES: stdlib (asyncio, logging, subprocess); FreeBSD base (jexec, jls, kill)
+# PUBLIC_API: Lifecycled (class), teardown(jail_name) (async), NotAvailable
 # END_AI_HEADER
 """
-jailrun.runtime.lifecycle — client for **bsdos_lifecycled** (the bzdOS jail
-lifecycle daemon), reused as jailrun's jail-process-lifecycle backend.
+jailrun.runtime.lifecycle — native jail process lifecycle.
+
+Self-contained: no external daemon, no IPC socket. Uses FreeBSD base
+commands directly:
+
+  FREEZE    jexec <jail> kill -STOP -1   (pause all jail processes, 0% CPU)
+  THAW      jexec <jail> kill -CONT -1   (resume, instant)
+  KILL      jexec <jail> kill -KILL -1   (SIGKILL all jail processes)
+  STATUS    jls -n                        (list running jails)
+
+HIBERNATE / RESTORE are not yet implemented (need ZFS snapshot integration
+with the engine's dataset tracking); they raise NotAvailable, honestly.
 
 Responsibility split (see ARCHITECTURE.md):
-  jailrun        OWNS create / mount / jexec / ZFS (store + engine).
-  bsdos_lifecycled OWNS the *running jail's process lifecycle*. We delegate to it
-                 instead of hand-rolling signalling/teardown, reusing proven code
-                 (jail_get(2) + sysctl(KERN_PROC_PROC) PID-targeted signals).
+  jailrun   OWNS create / mount / jexec / ZFS (store + engine).
+  this mod  OWNS process-level signals (STOP/CONT/KILL) inside a running jail.
 
-Wire protocol (from bsdOS/lifecycled/src/main.rs, read 2026-06-30):
-  transport : AF_UNIX stream socket, default /var/run/bsdos-lifecycle.sock
-  request   : one line  "<VERB> <jail_name>\\n"
-              VERB ∈ FREEZE | THAW | HIBERNATE | RESTORE | KILL | STATUS
-  response  : a line — JSON like {"cmd":..,"ok":bool,"msg"/"err":..}; STATUS
-              returns {"ok":true,"jails":[{app_id,jid,state,pids}]}
-  jail_name : == the jail's name. jailrun names its jails "jailrun-<handle>".
-
-Semantics (bsdos_lifecycled):
-  FREEZE    SIGSTOP all jail procs   (0% CPU, state stays in RAM)
-  THAW      SIGCONT                  (instant resume, <1ms)
-  HIBERNATE ZFS snapshot + SIGSTOP   (RAM-light; FreeBSD has no RAM swap-out)
-  RESTORE   thaw, or restore from snapshot
-  KILL      SIGKILL all procs + bsdOS cleanup (the process half of `--rm`)
-  STATUS    list tracked jails
-
-Fallback (daemon absent — not installed / not FreeBSD / socket missing):
-  KILL degrades to nothing here (the engine always follows with `jail -r`, which
-  removes the jail and its procs). FREEZE/THAW/HIBERNATE/RESTORE are
-  lifecycled-ONLY features — without the daemon they raise NotAvailable, honestly.
-
-DEPENDENCY: bsdos_lifecycled (bzdOS). Source bsdOS/lifecycled; prebuilt FreeBSD
-binary via bsdOS's own build/deploy pipeline; rc.d bsdos_lifecycled.
+How jexec kill works:
+  jexec <jail> kill -<SIG> -1
+  - jexec attaches to the jail's namespace and runs kill(1).
+  - kill -1 (pid -1) sends the signal to all processes the caller can see
+    and has permission to signal — inside a jail that's exactly that jail's
+    processes (minus the transient kill process itself).
+  - The kill process exits immediately; the signal is already delivered.
 """
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import os
-import socket
+import subprocess
 
 log = logging.getLogger("jailrun.lifecycle")
 
-DEFAULT_SOCK = os.getenv("JAILRUN_LIFECYCLED_SOCK", "/var/run/bsdos-lifecycle.sock")
-_VERBS = {"FREEZE", "THAW", "HIBERNATE", "RESTORE", "KILL", "STATUS"}
 _TIMEOUT_S = 10.0
 
 
-# NotAvailable: RuntimeError subtype raised when a lifecycled-only verb is
-#   requested (FREEZE/THAW/HIBERNATE/RESTORE) but the daemon socket is absent
 class NotAvailable(RuntimeError):
-    """Raised when a lifecycled-only op is requested but the daemon is absent."""
+    """Raised when a lifecycle op is not supported on this platform."""
 
 
-# Lifecycled:start
-#   purpose: thin synchronous client for the bsdos_lifecycled AF_UNIX stream socket
-#   intent: encapsulates wire protocol (one-line request, one-line JSON response) so
-#           callers use named methods and get plain dicts back; stateless except sock_path
-#   sideEffects: none at construction; each method call opens a TCP-equivalent AF_UNIX
-#                socket to sock_path, sends a line, receives a line, closes the socket
-# Lifecycled:end
+def _jail_signal(jail: str, sig: str) -> dict:
+    """Send a signal to all processes in a jail via ``jexec <jail> kill -<sig> -1``."""
+    try:
+        r = subprocess.run(
+            ["jexec", jail, "kill", f"-{sig}", "-1"],
+            capture_output=True,
+            timeout=_TIMEOUT_S,
+        )
+        if r.returncode == 0:
+            return {"ok": True, "msg": f"{sig} delivered to {jail}"}
+        err = r.stderr.decode(errors="replace").strip()
+        return {"ok": False, "err": err or f"jexec kill -{sig} -1 failed (rc={r.returncode})"}
+    except FileNotFoundError:
+        return {"ok": False, "err": "jexec not found — not running on FreeBSD?"}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "err": f"jexec kill -{sig} -1 timed out ({_TIMEOUT_S}s)"}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "err": str(exc)}
+
+
 class Lifecycled:
-    """Thin synchronous client for the bsdos_lifecycled Unix socket."""
+    """Native jail lifecycle — uses FreeBSD jexec/jls directly."""
 
-    # __init__: stores sock_path; no I/O (returns True/False for available())
-    def __init__(self, sock_path: str = DEFAULT_SOCK) -> None:
+    def __init__(self, sock_path: str = "") -> None:
+        # sock_path retained for API compatibility; unused (no daemon).
         self.sock_path = sock_path
 
-    # available: returns True if sock_path exists on filesystem (no handshake, best-effort)
     def available(self) -> bool:
-        """True if the daemon socket is present (best-effort, no handshake)."""
-        return os.path.exists(self.sock_path)
-
-    # _cmd:start
-    #   purpose: send a single verb+jail command to bsdos_lifecycled and return parsed response
-    #   input:
-    #     verb: str — one of FREEZE|THAW|HIBERNATE|RESTORE|KILL|STATUS (uppercased internally)
-    #     jail: str — jail name passed after the verb; empty string for STATUS
-    #   output:
-    #     result: dict — parsed JSON response {"ok": bool, "msg"/"err": ...} or
-    #                    {"ok": True, "raw": <unparsed line>} on JSON decode failure
-    #   sideEffects: connects AF_UNIX SOCK_STREAM to self.sock_path; sends encoded line;
-    #                receives up to 65536 bytes per chunk until newline or EOF; closes socket
-    #   rationale: loop reads until newline because daemon answers exactly one line per command;
-    #              fallback to raw dict avoids hard crash on unexpected daemon output
-    def _cmd(self, verb: str, jail: str = "") -> dict:
-        verb = verb.upper()
-        if verb not in _VERBS:
-            raise ValueError(f"unknown lifecycle verb: {verb!r}")
-        if not self.available():
-            raise NotAvailable(f"bsdos_lifecycled socket not found: {self.sock_path}")
-
-        line = f"{verb} {jail}".strip() + "\n"
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
-            s.settimeout(_TIMEOUT_S)
-            s.connect(self.sock_path)
-            s.sendall(line.encode())
-            chunks: list[bytes] = []
-            while True:
-                buf = s.recv(65536)
-                if not buf:
-                    break
-                chunks.append(buf)
-                if b"\n" in buf:  # daemon answers one line per command
-                    break
-        raw = b"".join(chunks).decode(errors="replace").strip()
+        """True if jexec is present (i.e. we're on FreeBSD)."""
         try:
-            return json.loads(raw)
-        except (ValueError, json.JSONDecodeError):
-            return {"ok": True, "raw": raw}
-    # _cmd:end
+            subprocess.run(
+                ["jexec", "-h"],
+                capture_output=True, timeout=2,
+            )
+            return True
+        except FileNotFoundError:
+            return False
+        except Exception:  # noqa: BLE001
+            return True  # best-effort: jexec exists but -h isn't supported
 
-    # freeze:start
-    #   purpose: ask lifecycled to SIGSTOP all processes in jail (0% CPU, state in RAM)
-    #   input:
-    #     jail: str — jail name (jailrun uses "jailrun-<handle>")
-    #   output:
-    #     result: dict — lifecycled JSON response {"ok": bool, ...}
-    #   sideEffects: opens AF_UNIX socket to self.sock_path; sends "FREEZE <jail>\n"; reads response
     def freeze(self, jail: str) -> dict:
-        return self._cmd("FREEZE", jail)
-    # freeze:end
+        """SIGSTOP all processes in the jail (pause, 0% CPU, state in RAM)."""
+        return _jail_signal(jail, "STOP")
 
-    # thaw:start
-    #   purpose: ask lifecycled to SIGCONT all frozen jail processes (instant resume)
-    #   input:
-    #     jail: str — jail name
-    #   output:
-    #     result: dict — lifecycled JSON response {"ok": bool, ...}
-    #   sideEffects: opens AF_UNIX socket to self.sock_path; sends "THAW <jail>\n"; reads response
     def thaw(self, jail: str) -> dict:
-        return self._cmd("THAW", jail)
-    # thaw:end
+        """SIGCONT all frozen jail processes (instant resume)."""
+        return _jail_signal(jail, "CONT")
 
-    # hibernate:start
-    #   purpose: ask lifecycled to take a ZFS snapshot then SIGSTOP jail procs (RAM-light suspend)
-    #   input:
-    #     jail: str — jail name
-    #   output:
-    #     result: dict — lifecycled JSON response {"ok": bool, ...}
-    #   sideEffects: opens AF_UNIX socket to self.sock_path; sends "HIBERNATE <jail>\n";
-    #                reads response (daemon side performs zfs snapshot + SIGSTOP)
-    def hibernate(self, jail: str) -> dict:
-        return self._cmd("HIBERNATE", jail)
-    # hibernate:end
-
-    # restore:start
-    #   purpose: ask lifecycled to thaw a frozen jail or restore it from ZFS snapshot
-    #   input:
-    #     jail: str — jail name
-    #   output:
-    #     result: dict — lifecycled JSON response {"ok": bool, ...}
-    #   sideEffects: opens AF_UNIX socket to self.sock_path; sends "RESTORE <jail>\n"; reads response
-    def restore(self, jail: str) -> dict:
-        return self._cmd("RESTORE", jail)
-    # restore:end
-
-    # kill:start
-    #   purpose: ask lifecycled to SIGKILL all jail procs and run bsdOS cleanup
-    #   input:
-    #     jail: str — jail name
-    #   output:
-    #     result: dict — lifecycled JSON response {"ok": bool, ...}
-    #   sideEffects: opens AF_UNIX socket to self.sock_path; sends "KILL <jail>\n";
-    #                reads response (daemon side sends SIGKILL to all jail PIDs + bsdOS cleanup)
-    #   rationale: engine always follows with `jail -r`; this is the process half of --rm
     def kill(self, jail: str) -> dict:
-        return self._cmd("KILL", jail)
-    # kill:end
+        """SIGKILL all processes in the jail."""
+        return _jail_signal(jail, "KILL")
 
-    # status:start
-    #   purpose: retrieve list of all jails tracked by lifecycled with their states and PIDs
-    #   input: none
-    #   output:
-    #     result: dict — {"ok": true, "jails": [{app_id, jid, state, pids}, ...]}
-    #   sideEffects: opens AF_UNIX socket to self.sock_path; sends "STATUS\n"; reads response
+    def hibernate(self, jail: str) -> dict:  # noqa: ARG002
+        raise NotAvailable(
+            "hibernate requires ZFS snapshot integration — not yet wired into lifecycle.py"
+        )
+
+    def restore(self, jail: str) -> dict:  # noqa: ARG002
+        raise NotAvailable(
+            "restore requires ZFS snapshot integration — not yet wired into lifecycle.py"
+        )
+
     def status(self) -> dict:
-        return self._cmd("STATUS")
-    # status:end
+        """List all running jails via jls."""
+        try:
+            r = subprocess.run(
+                ["jls", "-n"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if r.returncode == 0:
+                blocks = [b.strip() for b in r.stdout.strip().split("\n\n") if b.strip()]
+                return {"ok": True, "jails": blocks}
+            return {"ok": False, "err": r.stderr.strip()}
+        except FileNotFoundError:
+            return {"ok": False, "err": "jls not found — not running on FreeBSD?"}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "err": str(exc)}
 
 
-# teardown:start
-#   purpose: best-effort signal jail process termination via lifecycled before engine teardown
-#   input:
-#     jail_name: str — jail name passed to lifecycled KILL verb
-#     sock_path: str — path to bsdos_lifecycled Unix socket (default from env/DEFAULT_SOCK)
-#   output:
-#     result: None — always; errors are caught and logged, never re-raised
-#   sideEffects: if daemon is present: runs asyncio.to_thread(lc.kill, jail_name) which opens
-#                AF_UNIX socket and sends KILL command; writes to log at INFO on success,
-#                WARNING on failure, DEBUG if daemon absent
-#   rationale: engine always follows with `jail -r` (removes persist jail) and optionally
-#              store.destroy (zfs destroy + unmount); so a missing or failing daemon is
-#              non-fatal — the jail and its procs are removed by jail(8) regardless
-async def teardown(jail_name: str, *, sock_path: str = DEFAULT_SOCK) -> None:
+async def teardown(jail_name: str, *, sock_path: str = "") -> None:
     """
-    Stop a jail's processes the bzdOS way, then leave it to the engine to
-    `jail -r` + ZFS-destroy.
+    Best-effort SIGKILL all jail processes via native jexec, before the
+    engine follows with ``jail -r`` (removes the persist jail) and
+    ``store.destroy`` (ZFS destroy + unmount).
 
-    Step 1: ask bsdos_lifecycled to KILL (SIGKILL all PIDs + bsdOS cleanup), if the
-            daemon is present — best-effort, never fatal.
-    The engine ALWAYS follows with `jail -r` (removes the persist jail) and, on
-    --rm, `store.destroy` (zfs destroy + unmount). So a missing daemon is fine.
+    Non-fatal: if jexec fails (jail already gone, not on FreeBSD, etc.)
+    the engine's ``jail -r`` handles teardown regardless.
     """
-    lc = Lifecycled(sock_path)
-    # START_CHECK_DAEMON_PRESENCE
-    if not lc.available():
-        log.debug("bsdos_lifecycled absent (%s) — engine's jail -r handles teardown", sock_path)
-        return
-    # END_CHECK_DAEMON_PRESENCE
-    # START_SEND_KILL
     try:
-        res = await asyncio.to_thread(lc.kill, jail_name)
-        log.info("bsdos_lifecycled KILL %s -> %s", jail_name, res)
+        res = await asyncio.to_thread(_jail_signal, jail_name, "KILL")
+        if res.get("ok"):
+            log.info("native KILL %s -> ok", jail_name)
+        else:
+            log.debug("native KILL %s non-fatal: %s", jail_name, res.get("err", ""))
     except Exception as exc:  # noqa: BLE001
-        log.warning("bsdos_lifecycled KILL %s failed (non-fatal): %s", jail_name, exc)
-    # END_SEND_KILL
-# teardown:end
+        log.debug("native KILL %s failed (non-fatal): %s", jail_name, exc)
