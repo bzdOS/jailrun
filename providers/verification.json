@@ -3,538 +3,804 @@
   "generated": {
     "host": "freebsd-15.1-dev",
     "freebsd_version": "15.1-RC2",
-    "checked_at": "2026-07-24T12:39:21+00:00",
-    "method": "path-exists"
+    "checked_at": "2026-07-24T13:06:10+00:00",
+    "method": "path-exists+smoke-jail"
   },
   "entries": {
     "ar": {
       "provider": "pkg:binutils",
       "artifact_path": "/usr/local/bin/ar",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "multi-binary-pkg"
+        "source": "multi-binary-pkg",
+        "smoke_cmd": [
+          "/usr/local/bin/ar",
+          "--version"
+        ],
+        "exit_code": 0
       }
     },
     "bash": {
       "provider": "pkg:bash",
       "artifact_path": "/usr/local/bin/bash",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "pkg-artifacts"
+        "source": "pkg-artifacts",
+        "smoke_cmd": [
+          "/usr/local/bin/bash",
+          "--version"
+        ],
+        "exit_code": 0
       }
     },
     "bazel": {
       "provider": "pkg:bazel",
       "artifact_path": "/usr/local/bin/bazel",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "pkg-artifacts"
+        "source": "pkg-artifacts",
+        "smoke_cmd": [
+          "/usr/local/bin/bazel",
+          "--version"
+        ],
+        "exit_code": 0
       }
     },
     "bzip2": {
       "provider": "pkg:bzip2",
       "artifact_path": "/usr/local/bin/bzip2",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "pkg-artifacts"
+        "source": "pkg-artifacts",
+        "smoke_cmd": [
+          "/usr/local/bin/bzip2",
+          "--version"
+        ],
+        "exit_code": 0
       }
     },
     "clang": {
       "provider": "pkg:llvm22",
       "artifact_path": "/usr/local/bin/clang22",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "multi-binary-pkg"
+        "source": "multi-binary-pkg",
+        "smoke_cmd": [
+          "/usr/local/bin/clang22",
+          "--version"
+        ],
+        "exit_code": 0
       }
     },
     "clang++": {
       "provider": "pkg:llvm22",
       "artifact_path": "/usr/local/bin/clang++22",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "multi-binary-pkg"
+        "source": "multi-binary-pkg",
+        "smoke_cmd": [
+          "/usr/local/bin/clang++22",
+          "--version"
+        ],
+        "exit_code": 0
       }
     },
     "cmake": {
       "provider": "pkg:cmake",
       "artifact_path": "/usr/local/bin/cmake",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "pkg-artifacts"
+        "source": "pkg-artifacts",
+        "smoke_cmd": [
+          "/usr/local/bin/cmake",
+          "--version"
+        ],
+        "exit_code": 0
       }
     },
     "curl": {
       "provider": "pkg:curl",
       "artifact_path": "/usr/local/bin/curl",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "pkg-artifacts"
+        "source": "pkg-artifacts",
+        "smoke_cmd": [
+          "/usr/local/bin/curl",
+          "--version"
+        ],
+        "exit_code": 0
       }
     },
     "dash": {
       "provider": "pkg:dash",
       "artifact_path": "/usr/local/bin/dash",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "pkg-artifacts"
+        "source": "pkg-artifacts",
+        "smoke_cmd": [
+          "/usr/local/bin/dash",
+          "-c",
+          "exit 0"
+        ],
+        "exit_code": 0
       }
     },
     "g++": {
       "provider": "pkg:gcc16",
       "artifact_path": "/usr/local/bin/g++16",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "multi-binary-pkg"
+        "source": "multi-binary-pkg",
+        "smoke_cmd": [
+          "/usr/local/bin/g++16",
+          "--version"
+        ],
+        "exit_code": 0
       }
     },
     "gcc": {
       "provider": "pkg:gcc16",
       "artifact_path": "/usr/local/bin/gcc16",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "multi-binary-pkg"
+        "source": "multi-binary-pkg",
+        "smoke_cmd": [
+          "/usr/local/bin/gcc16",
+          "--version"
+        ],
+        "exit_code": 0
       }
     },
     "git": {
       "provider": "pkg:git",
       "artifact_path": "/usr/local/bin/git",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "pkg-artifacts"
+        "source": "pkg-artifacts",
+        "smoke_cmd": [
+          "/usr/local/bin/git",
+          "--version"
+        ],
+        "exit_code": 0
       }
     },
     "gmake": {
       "provider": "pkg:gmake",
       "artifact_path": "/usr/local/bin/gmake",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "pkg-artifacts"
+        "source": "pkg-artifacts",
+        "smoke_cmd": [
+          "/usr/local/bin/gmake",
+          "--version"
+        ],
+        "exit_code": 0
       }
     },
     "gzip": {
       "provider": "pkg:gzip",
       "artifact_path": "/usr/local/bin/gzip",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "pkg-artifacts"
+        "source": "pkg-artifacts",
+        "smoke_cmd": [
+          "/usr/local/bin/gzip",
+          "--version"
+        ],
+        "exit_code": 0
       }
     },
     "java": {
       "provider": "pkg:openjdk21",
       "artifact_path": "/usr/local/openjdk21/bin/java",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "pkg-artifacts"
+        "source": "pkg-artifacts",
+        "smoke_cmd": [
+          "/usr/local/openjdk21/bin/java",
+          "-version"
+        ],
+        "exit_code": 0
       }
     },
     "ld": {
       "provider": "pkg:binutils",
       "artifact_path": "/usr/local/bin/ld",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "multi-binary-pkg"
+        "source": "multi-binary-pkg",
+        "smoke_cmd": [
+          "/usr/local/bin/ld",
+          "--version"
+        ],
+        "exit_code": 0
       }
     },
     "lua": {
       "provider": "pkg:lua54",
       "artifact_path": "/usr/local/bin/lua54",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "heuristic"
+        "source": "heuristic",
+        "smoke_cmd": [
+          "/usr/local/bin/lua54",
+          "-v"
+        ],
+        "exit_code": 0
       }
     },
     "make": {
       "provider": "pkg:gmake",
       "artifact_path": "/usr/local/bin/gmake",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "pkg-artifacts"
+        "source": "pkg-artifacts",
+        "smoke_cmd": [
+          "/usr/local/bin/gmake",
+          "--version"
+        ],
+        "exit_code": 0
       }
     },
     "meson": {
       "provider": "pkg:meson",
       "artifact_path": "/usr/local/bin/meson",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "pkg-artifacts"
+        "source": "pkg-artifacts",
+        "smoke_cmd": [
+          "/usr/local/bin/meson",
+          "--version"
+        ],
+        "exit_code": 0
       }
     },
     "ninja": {
       "provider": "pkg:ninja",
       "artifact_path": "/usr/local/bin/ninja",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "pkg-artifacts"
+        "source": "pkg-artifacts",
+        "smoke_cmd": [
+          "/usr/local/bin/ninja",
+          "--version"
+        ],
+        "exit_code": 0
       }
     },
     "nm": {
       "provider": "pkg:binutils",
       "artifact_path": "/usr/local/bin/nm",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "multi-binary-pkg"
+        "source": "multi-binary-pkg",
+        "smoke_cmd": [
+          "/usr/local/bin/nm",
+          "--version"
+        ],
+        "exit_code": 0
       }
     },
     "node": {
       "provider": "pkg:node",
       "artifact_path": "/usr/local/bin/node",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "heuristic"
+        "source": "heuristic",
+        "smoke_cmd": [
+          "/usr/local/bin/node",
+          "--version"
+        ],
+        "exit_code": 0
       }
     },
     "nodejs": {
       "provider": "pkg:node",
       "artifact_path": "/usr/local/bin/node",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "heuristic"
+        "source": "heuristic",
+        "smoke_cmd": [
+          "/usr/local/bin/node",
+          "--version"
+        ],
+        "exit_code": 0
       }
     },
     "objcopy": {
       "provider": "pkg:binutils",
       "artifact_path": "/usr/local/bin/objcopy",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "multi-binary-pkg"
+        "source": "multi-binary-pkg",
+        "smoke_cmd": [
+          "/usr/local/bin/objcopy",
+          "--version"
+        ],
+        "exit_code": 0
       }
     },
     "openssl": {
       "provider": "pkg:openssl",
       "artifact_path": "/usr/local/bin/openssl",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "pkg-artifacts"
+        "source": "pkg-artifacts",
+        "smoke_cmd": [
+          "/usr/local/bin/openssl",
+          "version"
+        ],
+        "exit_code": 0
       }
     },
     "perl": {
       "provider": "pkg:perl5",
       "artifact_path": "/usr/local/bin/perl",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "pkg-artifacts"
+        "source": "pkg-artifacts",
+        "smoke_cmd": [
+          "/usr/local/bin/perl",
+          "--version"
+        ],
+        "exit_code": 0
       }
     },
     "perl5": {
       "provider": "pkg:perl5",
       "artifact_path": "/usr/local/bin/perl",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "pkg-artifacts"
+        "source": "pkg-artifacts",
+        "smoke_cmd": [
+          "/usr/local/bin/perl",
+          "--version"
+        ],
+        "exit_code": 0
       }
     },
     "php": {
       "provider": "pkg:php83",
       "artifact_path": "/usr/local/bin/php",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "pkg-artifacts"
+        "source": "pkg-artifacts",
+        "smoke_cmd": [
+          "/usr/local/bin/php",
+          "--version"
+        ],
+        "exit_code": 0
       }
     },
     "pip": {
       "provider": "pkg:py311-pip",
       "artifact_path": "/usr/local/bin/pip",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "pkg-artifacts"
+        "source": "pkg-artifacts",
+        "smoke_cmd": [
+          "/usr/local/bin/pip",
+          "--version"
+        ],
+        "exit_code": 0
       }
     },
     "pip3": {
       "provider": "pkg:py311-pip",
       "artifact_path": "/usr/local/bin/pip",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "pkg-artifacts"
+        "source": "pkg-artifacts",
+        "smoke_cmd": [
+          "/usr/local/bin/pip",
+          "--version"
+        ],
+        "exit_code": 0
       }
     },
     "python": {
       "provider": "pkg:python311",
       "artifact_path": "/usr/local/bin/python3.11",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "pkg-artifacts"
+        "source": "pkg-artifacts",
+        "smoke_cmd": [
+          "/usr/local/bin/python3.11",
+          "--version"
+        ],
+        "exit_code": 0
       }
     },
     "python3": {
       "provider": "pkg:python311",
       "artifact_path": "/usr/local/bin/python3.11",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "pkg-artifacts"
+        "source": "pkg-artifacts",
+        "smoke_cmd": [
+          "/usr/local/bin/python3.11",
+          "--version"
+        ],
+        "exit_code": 0
       }
     },
     "python3.10": {
       "provider": "pkg:python310",
       "artifact_path": "/usr/local/bin/python3.10",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "pkg-artifacts"
+        "source": "pkg-artifacts",
+        "smoke_cmd": [
+          "/usr/local/bin/python3.10",
+          "--version"
+        ],
+        "exit_code": 0
       }
     },
     "python3.11": {
       "provider": "pkg:python311",
       "artifact_path": "/usr/local/bin/python3.11",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "pkg-artifacts"
+        "source": "pkg-artifacts",
+        "smoke_cmd": [
+          "/usr/local/bin/python3.11",
+          "--version"
+        ],
+        "exit_code": 0
       }
     },
     "python3.12": {
       "provider": "pkg:python312",
       "artifact_path": "/usr/local/bin/python3.12",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "pkg-artifacts"
+        "source": "pkg-artifacts",
+        "smoke_cmd": [
+          "/usr/local/bin/python3.12",
+          "--version"
+        ],
+        "exit_code": 0
       }
     },
     "readelf": {
       "provider": "pkg:binutils",
       "artifact_path": "/usr/local/bin/readelf",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "multi-binary-pkg"
+        "source": "multi-binary-pkg",
+        "smoke_cmd": [
+          "/usr/local/bin/readelf",
+          "--version"
+        ],
+        "exit_code": 0
       }
     },
     "ruby": {
       "provider": "pkg:ruby",
       "artifact_path": "/usr/local/bin/ruby",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "heuristic"
+        "source": "heuristic",
+        "smoke_cmd": [
+          "/usr/local/bin/ruby",
+          "--version"
+        ],
+        "exit_code": 0
       }
     },
     "scons": {
       "provider": "pkg:scons-py312",
       "artifact_path": "/usr/local/bin/scons",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "pkg-artifacts"
+        "source": "pkg-artifacts",
+        "smoke_cmd": [
+          "/usr/local/bin/scons",
+          "--version"
+        ],
+        "exit_code": 0
       }
     },
     "sh": {
       "provider": "pkg:bash",
       "artifact_path": "/usr/local/bin/bash",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "pkg-artifacts"
+        "source": "pkg-artifacts",
+        "smoke_cmd": [
+          "/usr/local/bin/bash",
+          "--version"
+        ],
+        "exit_code": 0
       }
     },
     "sqlite3": {
       "provider": "pkg:sqlite3",
       "artifact_path": "/usr/local/bin/sqlite3",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "heuristic"
+        "source": "heuristic",
+        "smoke_cmd": [
+          "/usr/local/bin/sqlite3",
+          "--version"
+        ],
+        "exit_code": 0
       }
     },
     "strip": {
       "provider": "pkg:binutils",
       "artifact_path": "/usr/local/bin/strip",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "multi-binary-pkg"
+        "source": "multi-binary-pkg",
+        "smoke_cmd": [
+          "/usr/local/bin/strip",
+          "--version"
+        ],
+        "exit_code": 0
       }
     },
     "tar": {
       "provider": "pkg:gtar",
       "artifact_path": "/usr/local/bin/gtar",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "pkg-artifacts"
+        "source": "pkg-artifacts",
+        "smoke_cmd": [
+          "/usr/local/bin/gtar",
+          "--version"
+        ],
+        "exit_code": 0
       }
     },
     "unzip": {
       "provider": "pkg:unzip",
       "artifact_path": "/usr/local/bin/unzip",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "pkg-artifacts"
+        "source": "pkg-artifacts",
+        "smoke_cmd": [
+          "/usr/local/bin/unzip",
+          "-v"
+        ],
+        "exit_code": 0
       }
     },
     "wget": {
       "provider": "pkg:wget",
       "artifact_path": "/usr/local/bin/wget",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "pkg-artifacts"
+        "source": "pkg-artifacts",
+        "smoke_cmd": [
+          "/usr/local/bin/wget",
+          "--version"
+        ],
+        "exit_code": 0
       }
     },
     "xtensa-esp32-elf-g++": {
       "provider": "port:devel/xtensa-esp-elf",
       "artifact_path": "/usr/local/xtensa-esp-elf/bin/xtensa-esp-elf-gcc",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "port-artifacts"
+        "source": "port-artifacts",
+        "smoke_cmd": [
+          "/usr/local/xtensa-esp-elf/bin/xtensa-esp-elf-gcc",
+          "--version"
+        ],
+        "exit_code": 0
       }
     },
     "xtensa-esp32-elf-gcc": {
       "provider": "port:devel/xtensa-esp-elf",
       "artifact_path": "/usr/local/xtensa-esp-elf/bin/xtensa-esp-elf-gcc",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "port-artifacts"
+        "source": "port-artifacts",
+        "smoke_cmd": [
+          "/usr/local/xtensa-esp-elf/bin/xtensa-esp-elf-gcc",
+          "--version"
+        ],
+        "exit_code": 0
       }
     },
     "xtensa-esp32-elf-ld": {
       "provider": "port:devel/xtensa-esp-elf",
       "artifact_path": "/usr/local/xtensa-esp-elf/bin/xtensa-esp-elf-gcc",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "port-artifacts"
+        "source": "port-artifacts",
+        "smoke_cmd": [
+          "/usr/local/xtensa-esp-elf/bin/xtensa-esp-elf-gcc",
+          "--version"
+        ],
+        "exit_code": 0
       }
     },
     "xtensa-esp32-elf-objcopy": {
       "provider": "port:devel/xtensa-esp-elf",
       "artifact_path": "/usr/local/xtensa-esp-elf/bin/xtensa-esp-elf-gcc",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "port-artifacts"
+        "source": "port-artifacts",
+        "smoke_cmd": [
+          "/usr/local/xtensa-esp-elf/bin/xtensa-esp-elf-gcc",
+          "--version"
+        ],
+        "exit_code": 0
       }
     },
     "xtensa-esp32s2-elf-gcc": {
       "provider": "port:devel/xtensa-esp-elf",
       "artifact_path": "/usr/local/xtensa-esp-elf/bin/xtensa-esp-elf-gcc",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "port-artifacts"
+        "source": "port-artifacts",
+        "smoke_cmd": [
+          "/usr/local/xtensa-esp-elf/bin/xtensa-esp-elf-gcc",
+          "--version"
+        ],
+        "exit_code": 0
       }
     },
     "xtensa-esp32s3-elf-gcc": {
       "provider": "port:devel/xtensa-esp-elf",
       "artifact_path": "/usr/local/xtensa-esp-elf/bin/xtensa-esp-elf-gcc",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "port-artifacts"
+        "source": "port-artifacts",
+        "smoke_cmd": [
+          "/usr/local/xtensa-esp-elf/bin/xtensa-esp-elf-gcc",
+          "--version"
+        ],
+        "exit_code": 0
       }
     },
     "xtensa-lx106-elf-gcc": {
       "provider": "port:devel/xtensa-esp-elf",
       "artifact_path": "/usr/local/xtensa-esp-elf/bin/xtensa-esp-elf-gcc",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "port-artifacts"
+        "source": "port-artifacts",
+        "smoke_cmd": [
+          "/usr/local/xtensa-esp-elf/bin/xtensa-esp-elf-gcc",
+          "--version"
+        ],
+        "exit_code": 0
       }
     },
     "zip": {
       "provider": "pkg:zip",
       "artifact_path": "/usr/local/bin/zip",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "pkg-artifacts"
+        "source": "pkg-artifacts",
+        "smoke_cmd": [
+          "/usr/local/bin/zip",
+          "--version"
+        ],
+        "exit_code": 0
       }
     },
     "zsh": {
       "provider": "pkg:zsh",
       "artifact_path": "/usr/local/bin/zsh",
-      "verification": "exists",
+      "verification": "runs",
       "evidence": {
-        "method": "path-exists",
+        "method": "smoke-jail",
         "result": "present",
-        "source": "pkg-artifacts"
+        "source": "pkg-artifacts",
+        "smoke_cmd": [
+          "/usr/local/bin/zsh",
+          "--version"
+        ],
+        "exit_code": 0
       }
     }
   }

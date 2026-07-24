@@ -32,6 +32,8 @@ from providers.backfill import (  # noqa: E402
     host_info,
     render,
     resolve_artifact,
+    smoke_cmd,
+    verify_runs,
 )
 
 
@@ -145,6 +147,59 @@ def test_host_info_has_required_fields():
     info = host_info()
     for k in ("host", "freebsd_version", "checked_at", "method"):
         assert k in info and info[k], k
+
+
+# ---- L2 ("runs") verification: verify_runs() ----
+
+
+def test_smoke_cmd_default_and_override():
+    assert smoke_cmd("gcc", "/usr/local/bin/gcc16") == ["/usr/local/bin/gcc16", "--version"]
+    # java uses -version (no leading --).
+    assert smoke_cmd("java", "/usr/local/openjdk21/bin/java") == ["/usr/local/openjdk21/bin/java", "-version"]
+    # dash has no version flag -> multi-arg `dash -c 'exit 0'` probe.
+    assert smoke_cmd("dash", "/usr/local/bin/dash") == ["/usr/local/bin/dash", "-c", "exit 0"]
+
+
+def _l1_only(provider_map, exists=lambda p: True):
+    """collect() output with everything at L1 (exists) — the verify_runs input."""
+    return collect(provider_map, exists=exists)
+
+
+def test_verify_runs_bumps_l1_to_runs_on_exit_zero():
+    collected = _l1_only({"x": "pkg:somepkg"})
+    out = verify_runs(collected, runner=lambda cmd: 0)
+    e = out["x"]
+    assert e["verification"] == "runs"
+    assert e["evidence"]["method"] == "smoke-jail"
+    assert e["evidence"]["smoke_cmd"] == ["/usr/local/bin/somepkg", "--version"]
+    assert e["evidence"]["exit_code"] == 0
+
+
+def test_verify_runs_leaves_exists_on_nonzero_exit():
+    collected = _l1_only({"x": "pkg:somepkg"})
+    out = verify_runs(collected, runner=lambda cmd: 2)
+    assert out["x"]["verification"] == "exists"  # stayed at L1, not bumped
+    assert out["x"]["evidence"]["exit_code"] == 2  # but the attempt is recorded
+    assert out["x"]["evidence"]["method"] == "smoke-jail"
+
+
+def test_verify_runs_skips_l0_entries():
+    # An L0 (unresolved) entry has no artifact to run — runner must not be called.
+    collected = collect({"foo": "port:nonexistent/origin"}, exists=lambda p: True)
+    out = verify_runs(collected, runner=lambda cmd: (_ for _ in ()).throw(AssertionError("must not run L0")))
+    assert out["foo"]["verification"] == "guessed"
+    assert "smoke_cmd" not in out["foo"]["evidence"]
+
+
+def test_verify_runs_passes_smoke_cmd_to_runner():
+    seen = []
+    verify_runs(_l1_only({"gcc": "pkg:gcc16"}), runner=lambda cmd: seen.append(cmd) or 0)
+    assert seen == [["/usr/local/bin/gcc16", "--version"]]
+
+
+def test_verify_runs_never_invents_l3_l4():
+    out = verify_runs(_l1_only({"x": "pkg:somepkg"}), runner=lambda cmd: 0)
+    assert out["x"]["verification"] == "runs"  # L2 ceiling
 
 
 if __name__ == "__main__":

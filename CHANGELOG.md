@@ -6,6 +6,33 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); this project adh
 
 ## [Unreleased]
 
+### Added (2026-07-24) — roadmap 0.3, L2 ("runs") verification rung
+- **`verify_runs()` in `providers/backfill.py`** — climbs the verification
+  ladder L1→L2: for every entry already at L1 ("exists"), executes its smoke
+  command via an INJECTED runner and bumps verification to "runs" when it exits
+  0. The runner is injected (like `exists` for L1) so the module stays fully
+  unit-testable on Linux; on a FreeBSD host the real runner `jexec`s each
+  smoke command inside a throwaway jail — roadmap 0.3's L2 definition ("executes
+  a smoke command inside a jail, exit 0"). L2 catches binaries that are present
+  on disk (L1) but broken (missing shared lib / won't load) — a real signal
+  beyond L1. Never touches L0 entries (nothing to run) and never invents L3/L4
+  (behaves/proven — differential testing, the harness's job).
+- **`smoke_cmd()` + `SMOKE_ARGS`** — the per-binary smoke invocation. Default
+  `--version`; overrides confirmed live on FreeBSD 15.1 for tools whose version
+  flag differs or is absent: `java -version`, `dash -c 'exit 0'` (no version
+  flag), `lua -v`, `openssl version` (subcommand, not a flag), `unzip -v`.
+- **`providers/verification.json` regenerated** — now **all 53 entries at L2
+  (runs)**, evidence extended per entry with `{method:"smoke-jail",
+  smoke_cmd:[...], exit_code:0}`. Schema `$defs/verification.evidence` gained
+  optional `smoke_cmd`/`exit_code`; CI consistency-check unchanged. Honest note:
+  the L2 jail uses `path=/` (shares the host fs — the binaries' shared libs are
+  visible); deeper per-jail isolation (native-base jail) is a future refinement.
+- **0.3 reached a tangible intermediate state:** registry correctness fixed,
+  **0 L0**, **53/53 @ L1**, **53/53 @ L2**. Remaining to the full 0.3 exit
+  ("≥150 @ ≥L2; drift job green 2 weeks"): enumerate the registry to ≥150
+  binaries (the agent harness over real images), L3/L4 differential testing, and
+  the weekly CI drift-job (still blocked on the `workflow` OAuth scope).
+
 ### Added (2026-07-24) — roadmap 0.3 backfill (registry driven to 0 L0)
 - **Registry verification backfill (`providers/backfill.py`).** The standalone
   tool roadmap 0.3 calls for: walks every `provider-map.json` entry, resolves

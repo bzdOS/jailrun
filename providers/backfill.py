@@ -153,6 +153,74 @@ def collect(
 # collect:end
 
 
+# Per-binary smoke-command argument overrides. The default ["--version"] works for
+# the large majority of CLI tools (gcc/clang/python/cmake/ninja/git ... --version);
+# a few use a different invocation — java is "-version", and a handful have no
+# --version flag at all and need a different "does it run?" probe (confirmed live
+# on FreeBSD 15.1, rc=0 for each): dash has no version flag so run `dash -c 'exit
+# 0'`; lua54/lua uses `-v`; openssl's version is the subcommand `version`, not a
+# flag; unzip uses `-v`. Value is an arg LIST (dash needs two args).
+SMOKE_ARGS: dict[str, list[str]] = {
+    "java": ["-version"],
+    "dash": ["-c", "exit 0"],
+    "lua": ["-v"],
+    "openssl": ["version"],
+    "unzip": ["-v"],
+}
+
+
+# smoke_cmd:start
+#   purpose: the smoke invocation that proves a binary RUNS (L2)
+#   input:
+#     basename: str — the Linux binary basename (for the per-binary override)
+#     artifact_path: str — the resolved FreeBSD binary to invoke
+#   output:
+#     cmd: list[str] — [artifact_path, *args], ready for the runner; default
+#          [artifact_path, "--version"], overridden per-basename by SMOKE_ARGS
+def smoke_cmd(basename: str, artifact_path: str) -> list[str]:
+    return [artifact_path, *SMOKE_ARGS.get(basename, ["--version"])]
+# smoke_cmd:end
+
+
+# verify_runs:start
+#   purpose: climb the verification ladder L1 -> L2 ("runs") for every entry
+#            already at L1, by executing each artifact's smoke command via the
+#            INJECTED runner and bumping verification "exists" -> "runs" when it
+#            exits 0. This is the next rung after collect() (L0->L1): roadmap 0.3's
+#            "climb the ladder" + the L2 definition "executes a smoke command
+#            inside a jail, exit 0". On a FreeBSD host the real runner jexec's the
+#            command inside a throwaway jail; here it is injected so the module is
+#            unit-testable on Linux with a fake runner. Never touches L0 entries
+#            (no artifact to run) and never invents L3/L4 (behaves/proven).
+#   input:
+#     collected: dict[str, dict] — output of collect(); mutated in place
+#     runner: Callable[[list[str]], int] — executes the smoke command (the list
+#             [artifact_path, arg]), returns its exit code; 0 == "it ran"
+#   output:
+#     the same dict: each L1 entry's verification is bumped to "runs" iff
+#     runner(smoke_cmd) == 0, and its evidence is extended with
+#     {method:"smoke-jail", smoke_cmd:[...], exit_code:int}. A non-zero exit
+#     leaves verification at "exists" but still records the attempted smoke run
+#     (method/smoke_cmd/exit_code) so a reviewer sees it was tried, not skipped.
+def verify_runs(
+    collected: dict[str, dict[str, Any]],
+    runner: Callable[[list[str]], int],
+) -> dict[str, dict[str, Any]]:
+    for basename, entry in collected.items():
+        if entry["verification"] != "exists":
+            continue  # L0 has no artifact to run; L3/L4 are higher rungs' job
+        cmd = smoke_cmd(basename, entry["artifact_path"])
+        rc = runner(cmd)
+        ev = entry["evidence"]
+        ev["method"] = "smoke-jail"
+        ev["smoke_cmd"] = cmd
+        ev["exit_code"] = rc
+        if rc == 0:
+            entry["verification"] = "runs"
+    return collected
+# verify_runs:end
+
+
 # host_info:start
 #   purpose: gather the host context that makes an evidence record reproducible
 #   output:

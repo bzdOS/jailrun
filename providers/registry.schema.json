@@ -142,7 +142,16 @@
                 "properties": {
                   "method": { "type": "string" },
                   "result": { "enum": ["present", "absent", "unresolved"] },
-                  "source": { "type": "string" }
+                  "source": { "type": "string" },
+                  "smoke_cmd": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Present when method=smoke-jail (L2): the [artifact_path, arg] invocation that was run."
+                  },
+                  "exit_code": {
+                    "type": "integer",
+                    "description": "Present when method=smoke-jail (L2): the smoke command's exit code (0 -> verification bumped to runs)."
+                  }
                 }
               }
             }
