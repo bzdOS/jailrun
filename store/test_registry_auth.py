@@ -266,6 +266,7 @@ def test_resolve_no_auth_argv_unchanged():
         oci_dir = store._oci_dir_for(image_ref)
         assert calls == [[
             "skopeo", "copy",
+            "--remove-signatures",
             "--override-os", "linux",
             f"docker://{image_ref}",
             f"oci:{oci_dir}:latest",
@@ -288,6 +289,7 @@ def test_resolve_authfile_env_var_only():
             oci_dir = store._oci_dir_for(image_ref)
             assert calls == [[
                 "skopeo", "copy",
+                "--remove-signatures",
                 "--override-os", "linux",
                 "--authfile", authfile,
                 f"docker://{image_ref}",
@@ -307,6 +309,7 @@ def test_resolve_creds_param_only():
         oci_dir = store._oci_dir_for(image_ref)
         assert calls == [[
             "skopeo", "copy",
+            "--remove-signatures",
             "--override-os", "linux",
             "--creds", "testuser:testpass",
             f"docker://{image_ref}",
@@ -335,6 +338,7 @@ def test_resolve_both_given_creds_wins_precedence():
             oci_dir = store._oci_dir_for(image_ref)
             assert calls == [[
                 "skopeo", "copy",
+                "--remove-signatures",
                 "--override-os", "linux",
                 "--creds", "testuser:testpass",
                 f"docker://{image_ref}",

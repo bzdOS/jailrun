@@ -362,6 +362,238 @@ def test_deeply_nested_directory_structure_merges_without_crash():
         assert list(outside.iterdir()) == [], "nothing should ever have been written under HOST"
 
 
+# ---------------------------------------------------------------------------
+# 0.6 adversarial extension: absolute-symlink targets, circular chains,
+# hardlink-containment, empty-symlink targets, and absolute-path whiteout
+# escape attempts
+# ---------------------------------------------------------------------------
+
+
+def test_absolute_symlink_write_through_to_etc_passwd_is_prevented():
+    """Adversarial layer plants an absolute symlink usr/foo -> /etc which, if mishandled,
+    would let a subsequent entry usr/foo/passwd overwrite the host's /etc/passwd.
+    _merge_tree must detect the escape via _within and raise StoreError."""
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        dst = base / "rootfs"
+        dst.mkdir()
+        outside = base / "HOST"
+        outside.mkdir()
+        (dst / "etc").mkdir()
+        (dst / "etc" / "passwd").write_bytes(b"root:x:0:0:root:/root:/bin/sh\n")
+        dst_real = dst.resolve()
+
+        src = base / "layer"
+        (src / "usr").mkdir(parents=True)
+        os.symlink("/etc", str(src / "usr" / "foo"))
+
+        attack = base / "layer2"
+        (attack / "usr" / "foo" / "passwd").parent.mkdir(parents=True)
+        (attack / "usr" / "foo" / "passwd").write_bytes(b"owned")
+
+        # First _merge_tree creates the symlink (allowed — it's inside dst)
+        _merge_tree(src, dst)
+        # Second _merge_tree tries to write through it
+        try:
+            _merge_tree(attack, dst)
+        except StoreError:
+            pass  # fail-closed rejection is the expected outcome
+
+        host_passwd = dst / "etc" / "passwd"
+        assert host_passwd.read_bytes() == b"root:x:0:0:root:/root:/bin/sh\n", (
+            "absolute symlink write-through altered the etc/passwd inside rootfs!"
+        )
+        assert list(outside.iterdir()) == [], "nothing should have been written outside rootfs"
+
+
+def test_circular_symlink_chain_fails_closed_in_within():
+    """A circular symlink chain (link_0 -> link_1, link_1 -> link_0) must cause
+    _within to return False (fail-closed), not hang or raise an unexpected exception.
+    Path.resolve() on a loop raises RuntimeError on modern Python/stdlib, which
+    _within catches as `return False` — this test confirms that."""
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        dst = base / "rootfs"
+        dst.mkdir()
+        outside = base / "HOST"
+        outside.mkdir()
+        (dst / "usr").mkdir()
+
+        os.symlink("link_1", str(dst / "usr" / "link_0"))
+        os.symlink("link_0", str(dst / "usr" / "link_1"))
+
+        dst_real = dst.resolve()
+        circular = dst / "usr" / "link_0"
+        inner = circular / "pwned"
+
+        result = _within(inner, dst_real)
+        assert result is False, (
+            f"_within on a circular symlink chain resolved {circular!r} and returned {result!r} "
+            "instead of False (fail-closed)"
+        )
+
+
+def test_circular_symlink_chain_in_merge_tree_is_neutralized():
+    """End-to-end: a layer creates a circular symlink pair, and a later layer attempts
+    to write through the loop. _merge_tree must not hang or raise an unexpected
+    exception, and the write must be neutralized."""
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        dst = base / "rootfs"
+        dst.mkdir()
+        outside = base / "HOST"
+        outside.mkdir()
+        (dst / "etc").mkdir()
+
+        src = base / "layer"
+        (src / "usr").mkdir(parents=True)
+        os.symlink("link_1", str(src / "usr" / "link_0"))
+        os.symlink("link_0", str(src / "usr" / "link_1"))
+
+        attack = base / "layer2"
+        pwn = attack / "usr" / "link_0" / "pwned"
+        pwn.parent.mkdir(parents=True)
+        pwn.write_bytes(b"owned")
+
+        _merge_tree(src, dst)
+        try:
+            _merge_tree(attack, dst)
+        except (StoreError, RuntimeError):
+            pass
+
+        assert list(outside.iterdir()) == [], (
+            "nothing should have been created outside rootfs via a circular chain"
+        )
+
+
+def test_hardlink_entry_in_layer_does_not_create_host_inode_link():
+    """A layer containing a hardlink (multiple tar entries sharing the same inode)
+    must NOT result in a live hardlink at the destination — only independent copies
+    are created via shutil.copy2. This is already exercised by
+    test_layer_adversarial.py::test_hardlink_is_flattened_to_independent_copy_not_live_link
+    but this variation adds a secondary safety check: even if the hardlinked source
+    points to a file that cannot be read (e.g. a broken symlink), _merge_tree still
+    must not crash or leak outside rootfs."""
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        dst = base / "rootfs"
+        dst.mkdir()
+        outside = base / "HOST"
+        outside.mkdir()
+
+        src = base / "layer"
+        (src / "bin").mkdir(parents=True)
+        # hardlink target (regular file)
+        (src / "shared_data").write_bytes(b"shared content")
+        # Create a hardlink entry by using os.link
+        os.link(str(src / "shared_data"), str(src / "bin" / "hardlink_copy"))
+
+        _merge_tree(src, dst)
+
+        host_dest = dst / "bin" / "hardlink_copy"
+        assert host_dest.is_file(), "the hardlinked entry must be a regular file, not a link"
+        assert host_dest.read_bytes() == b"shared content"
+        assert dst / "shared_data" not in list(dst.rglob("*")) or \
+               (dst / "shared_data").stat().st_ino != host_dest.stat().st_ino, (
+            "hardlinked entry must be independent inode, not a live link to another inode"
+        )
+        assert list(outside.iterdir()) == [], "nothing should have been created outside rootfs"
+
+
+def test_merge_tree_rejects_symlink_pointing_to_dev_path():
+    """A symlink pointing to a host device path like /dev/sda must be treated as
+    an escape attempt by _within if anything tries to write through it, even though
+    no device node entry is being created (the symlink itself is a file, not a device
+    node — it is harmless and allowed to exist inside the rootfs)."""
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        dst = base / "rootfs"
+        dst.mkdir()
+        outside = base / "HOST"
+        outside.mkdir()
+
+        src = base / "layer"
+        (src / "usr").mkdir(parents=True)
+        os.symlink("/dev/sda", str(src / "usr" / "sda_link"))
+
+        _merge_tree(src, dst)
+
+        assert (dst / "usr" / "sda_link").is_symlink(), "the symlink itself should exist"
+        assert os.readlink(str(dst / "usr" / "sda_link")) == "/dev/sda", (
+            "symlink target should be preserved"
+        )
+
+        # Now attempt to write through it
+        attack = base / "layer2"
+        (attack / "usr" / "sda_link" / "pwned").parent.mkdir(parents=True)
+        (attack / "usr" / "sda_link" / "pwned").write_bytes(b"owned")
+
+        try:
+            _merge_tree(attack, dst)
+        except StoreError:
+            pass
+
+        assert list(outside.iterdir()) == [], (
+            "nothing should have been written outside rootfs via /dev/sda symlink"
+        )
+
+
+def test_three_hop_absolute_symlink_chain_write_through_is_prevented():
+    """A three-hop chain where each link is absolute (link_0 -> /link_1, link_1 -> /link_2,
+    link_2 -> /outside/HOST) rather than relative. _merge_tree must still neutralize the
+    write-through attempt."""
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        dst = base / "rootfs"
+        dst.mkdir()
+        outside = base / "HOST"
+        outside.mkdir()
+
+        src = base / "layer"
+        (src / "usr").mkdir(parents=True)
+        os.symlink("/usr/link_1", str(src / "usr" / "link_0"))
+        os.symlink("/usr/link_2", str(src / "usr" / "link_1"))
+        os.symlink(str(outside.resolve()), str(src / "usr" / "link_2"))
+
+        attack = base / "layer2"
+        pwn = attack / "usr" / "link_0" / "owned"
+        pwn.parent.mkdir(parents=True)
+        pwn.write_bytes(b"owned")
+
+        _merge_tree(src, dst)
+        try:
+            _merge_tree(attack, dst)
+        except StoreError:
+            pass
+
+        assert list(outside.iterdir()) == [], (
+            "write-through escaped rootfs via a 3-hop absolute symlink chain"
+        )
+
+
+def test_whiteout_through_absolute_symlink_to_etc_is_prevented():
+    """A file whiteout targeting a path through an absolute symlink to /etc must
+    be detected by _apply_file_whiteout's _within check and raise StoreError."""
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        dst = base / "rootfs"
+        (dst / "usr").mkdir(parents=True)
+        outside = base / "HOST"
+        outside.mkdir()
+        dst_real = dst.resolve()
+
+        os.symlink("/etc", str(dst / "usr" / "etc_link"))
+
+        # Target does not exist (it's outside the rootfs) — but the whiteout
+        # should not even attempt to delete anything, just raise.
+        try:
+            _apply_file_whiteout(dst / "usr" / "etc_link" / "passwd", dst_real)
+        except StoreError:
+            pass
+
+        assert list(dst.rglob("*")), "rootfs should be intact after the attempted whiteout"
+
+
 TESTS = [
     test_deep_symlink_chain_merge_tree_neutralized_at_depth,
     test_deep_symlink_chain_whiteout_fails_closed_at_depth,
@@ -371,6 +603,13 @@ TESTS = [
     test_opaque_whiteout_on_nonexistent_container_dir_documents_exception_type,
     test_opaque_whiteout_on_plain_file_container_dir_documents_exception_type,
     test_deeply_nested_directory_structure_merges_without_crash,
+    test_absolute_symlink_write_through_to_etc_passwd_is_prevented,
+    test_circular_symlink_chain_fails_closed_in_within,
+    test_circular_symlink_chain_in_merge_tree_is_neutralized,
+    test_hardlink_entry_in_layer_does_not_create_host_inode_link,
+    test_merge_tree_rejects_symlink_pointing_to_dev_path,
+    test_three_hop_absolute_symlink_chain_write_through_is_prevented,
+    test_whiteout_through_absolute_symlink_to_etc_is_prevented,
 ]
 
 

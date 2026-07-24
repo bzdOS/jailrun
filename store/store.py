@@ -194,6 +194,25 @@ def _get_registry_authfile() -> str:
     return os.environ.get("JAILRUN_REGISTRY_AUTHFILE", "").strip()
 
 
+# _get_extraction_jail_enabled: reads JAILRUN_EXTRACT_IN_JAIL env var (default "0").
+# When "1", each OCI layer blob is extracted inside a throwaway FreeBSD jail running
+# as the nobody user, so a bug in bsdtar or libarchive only compromises the minimal
+# extraction jail, not the host. When "0" (default for now — the jail template must
+# exist first), extraction runs unjailed as before.
+def _get_extraction_jail_enabled() -> bool:
+    val = os.environ.get("JAILRUN_EXTRACT_IN_JAIL", "0").strip().lower()
+    return val in ("1", "true", "yes")
+
+
+# Template root directory for the minimal extraction jail rootfs, built once by
+# _ensure_extraction_jail_template() then reused across all throwaway extraction
+# jails (each run gets its own throwaway jail sharing this path).
+EXTRACTION_JAIL_TEMPLATE = os.environ.get(
+    "JAILRUN_EXTRACT_JAIL_TEMPLATE",
+    "/var/jailrun/extract-jail-template",
+).strip()
+
+
 # ---------------------------------------------------------------------------
 # Exceptions
 # ---------------------------------------------------------------------------
@@ -1423,6 +1442,16 @@ class Store:
 
                 # Extract layer into tmp
                 #
+                # Two extraction modes:
+                #   1. JAILRUN_EXTRACT_IN_JAIL=1 (env var): run bsdtar inside a
+                #      throwaway FreeBSD jail as the nobody user. A bug in bsdtar
+                #      or libarchive only compromises the minimal extraction jail,
+                #      not the host. The jail template is built once (lazily) by
+                #      _ensure_extraction_jail_template() and reused across layers.
+                #   2. Default (JAILRUN_EXTRACT_IN_JAIL=0): run bsdtar directly on
+                #      the host as root — this is the historical path, used when
+                #      the jail template has not been created yet.
+                #
                 # --no-xattrs: many real-world OCI layers carry Linux-only
                 # extended attributes (e.g. `security.capability` on
                 # capability-tagged binaries like /usr/bin/ping, granting
@@ -1437,12 +1466,15 @@ class Store:
                 # nothing meaningful to restore anyway -- safe to skip
                 # unconditionally rather than only as a root-vs-non-root
                 # default.
-                self._run([
-                    "bsdtar", "-xf", str(layer_blob),
-                    "-C", str(tmp_path),
-                    "--no-same-owner",
-                    "--no-xattrs",
-                ], timeout=DEFAULT_EXTRACT_TIMEOUT_S)
+                if _get_extraction_jail_enabled():
+                    self._extract_layer_in_jail(layer_blob, tmp_path)
+                else:
+                    self._run([
+                        "bsdtar", "-xf", str(layer_blob),
+                        "-C", str(tmp_path),
+                        "--no-same-owner",
+                        "--no-xattrs",
+                    ], timeout=DEFAULT_EXTRACT_TIMEOUT_S)
 
                 # START_BSDTAR_OPAQUE_WHITEOUTS
                 # Apply opaque whiteouts first
@@ -1473,6 +1505,210 @@ class Store:
         _remove_whiteout_markers(rootfs)
         log.info("_unpack_bsdtar: layers applied")
     # _unpack_bsdtar:end
+
+    # ------------------------------------------------------------------
+    # Extraction jail (privilege reduction for bsdtar, milestone 0.6)
+    # ------------------------------------------------------------------
+
+    # EXTRACTION_JAIL_TEMPLATE_LIBS:start
+    #   purpose: list of shared libraries required inside the extraction jail
+    #            template, collected from `ldd /bin/sh /usr/bin/bsdtar` on
+    #            FreeBSD 15.1-RC2.  Used by _ensure_extraction_jail_template().
+    #   rationale: hard-coding the known library set rather than runtime-discovery
+    #              (ldd every time) avoids a subprocess call on every unpack and
+    #              makes the dependency explicit for anyone auditing the jail
+    #              template contents.  If a future FreeBSD version adds or removes
+    #              a transitive library, this list must be updated (the test
+    #              jailrun_gc_test_extraction_jail or similar will catch it).
+    _EXTRACTION_JAIL_LIBS: tuple[str, ...] = (
+        "/lib/libbsdxml.so.4",
+        "/lib/libc.so.7",
+        "/lib/libcrypto.so.35",
+        "/lib/libedit.so.8",
+        "/lib/libmd.so.7",
+        "/lib/libsys.so.7",
+        "/lib/libthr.so.3",
+        "/lib/libtinfow.so.9",
+        "/lib/libz.so.6",
+        "/usr/lib/libarchive.so.7",
+        "/usr/lib/libbz2.so.4",
+        "/usr/lib/liblzma.so.5",
+        "/usr/lib/libprivatezstd.so.5",
+    )
+    # EXTRACTION_JAIL_TEMPLATE_LIBS:end
+
+    # _ensure_extraction_jail_template:start
+    #   purpose: build (once) a minimal FreeBSD rootfs under
+    #            EXTRACTION_JAIL_TEMPLATE_DIR that contains just sh, bsdtar, and
+    #            their transitive shared libraries, plus a minimal /etc/passwd +
+    #            /etc/group and the ldconfig hints file.  Subsequent
+    #            _extract_layer_in_jail() calls share this single template (the
+    #            jail -c command references it via path=).
+    #   input:
+    #     force: bool — rebuild even if the template already exists (default False)
+    #   output:
+    #     template_path: Path — the absolute path of the template (always
+    #                           EXTRACTION_JAIL_TEMPLATE_DIR)
+    #   sideEffects: on first call (or when force=True): creates the template
+    #                directory tree, copies binary + library files from the host
+    #                filesystem, writes passwd/group, copies ldconfig hints.
+    #                Raises StoreError if any required host file is missing.
+    #   notes:
+    #     - Uses /bin/cp instead of shutil.copy2 because shutil.copy2 preserves
+    #       FreeBSD file flags (including schg on ld-elf.so.1), which would make
+    #       subsequent force=True updates fail with EPERM until chflags is run.
+    #     - chflags noschg is called before cp if the destination already exists
+    #       and is flagged immutable.
+    @staticmethod
+    def _cp(src: Path, dst: Path) -> None:
+        """Copy one file, removing schg flag if present on the destination."""
+        if dst.exists():
+            subprocess.run(["chflags", "noschg", str(dst)], capture_output=True, timeout=15)
+        subprocess.run(["cp", str(src), str(dst)], check=True, timeout=30)
+
+    def _ensure_extraction_jail_template(self, force: bool = False) -> Path:
+        template = Path(EXTRACTION_JAIL_TEMPLATE)
+        if not force and (template / "bin" / "sh").exists():
+            return template
+
+        log.info("building extraction jail template at %s", template)
+
+        # Create directory tree
+        for sub in ("bin", "usr/bin", "lib", "usr/lib", "etc", "libexec", "var/run"):
+            (template / sub).mkdir(parents=True, exist_ok=True)
+
+        # Copy runtime linker
+        ld = Path("/libexec/ld-elf.so.1")
+        if not ld.exists():
+            raise StoreError(f"runtime linker not found: {ld}")
+        self._cp(ld, template / "libexec" / "ld-elf.so.1")
+
+        # Copy binaries
+        for src, name in (("/bin/sh", "sh"), ("/usr/bin/bsdtar", "bsdtar")):
+            sp = Path(src)
+            if not sp.exists():
+                raise StoreError(f"required binary not found: {sp}")
+            dest = template / "bin" / name if name == "sh" else template / "usr/bin" / name
+            self._cp(sp, dest)
+
+        # Copy libraries
+        for lib_path in self._EXTRACTION_JAIL_LIBS:
+            lp = Path(lib_path)
+            if not lp.exists():
+                log.warning("extraction jail: library %s not found, skipping", lp)
+                continue
+            target = template / lp.relative_to(lp.anchor)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            self._cp(lp, target)
+
+        # Copy ldconfig hints (so rtld finds libs without LD_LIBRARY_PATH)
+        hints_src = Path("/var/run/ld-elf.so.hints")
+        if hints_src.exists():
+            self._cp(hints_src, template / "var/run" / "ld-elf.so.hints")
+
+        # Minimal passwd/group
+        (template / "etc" / "passwd").write_text(
+            "root:*:0:0::0:0:\nnobody:*:65534:65534::0:0:\n"
+        )
+        (template / "etc" / "group").write_text(
+            "wheel:*:0:\nnogroup:*:65534:\n"
+        )
+
+        log.info("extraction jail template ready at %s (%.1f MiB)",
+                 template, sum(f.stat().st_size for f in template.rglob("*") if f.is_file()) / 1048576)
+        return template
+    # _ensure_extraction_jail_template:end
+
+    # _extract_layer_in_jail:start
+    #   purpose: run bsdtar -xf <layer_blob> -C <output_dir> inside a throwaway
+    #            FreeBSD jail, using the minimal rootfs template built by
+    #            _ensure_extraction_jail_template().  The jail runs as nobody,
+    #            has no network (ip4=disable, ip6=disable), and is destroyed
+    #            immediately after bsdtar exits.
+    #   input:
+    #     layer_blob: Path — absolute path to the OCI layer tar blob (gzip or raw)
+    #     output_dir: Path — absolute path to the output directory (must exist,
+    #                 must be writable; contents are replaced with the extracted
+    #                 tar entries after this call)
+    #   output: None
+    #   sideEffects: creates a system jail via jail(8); mounts the blob's parent
+    #                directory and output_dir via nullfs so they are visible
+    #                inside the jail; runs bsdtar via jexec; removes the jail;
+    #                unmounts the nullfs mounts.  Never leaves a jail or mount
+    #                behind (teardown is in a finally block).
+    #   raises StoreError on jail creation failure, on bsdtar non-zero exit, or
+    #          on template build failure (transitively from
+    #          _ensure_extraction_jail_template).
+    def _extract_layer_in_jail(self, layer_blob: Path, output_dir: Path) -> None:
+        template = self._ensure_extraction_jail_template()
+        blob_parent = layer_blob.parent.resolve()
+        output_resolved = output_dir.resolve()
+        jail_name = f"jlr-extract-{uuid.uuid4().hex[:12]}"
+
+        # Mount points inside the template (they exist only while the jail runs,
+        # then get unmounted and removed).
+        mount_input  = template / "mnt" / "input"
+        mount_output = template / "mnt" / "output"
+        mount_input.mkdir(parents=True, exist_ok=True)
+        mount_output.mkdir(parents=True, exist_ok=True)
+
+        mount_cleanup: list[Path] = []
+        try:
+            # Mount layer blob parent (read-only) and output dir (read-write)
+            # into the template path so they are visible inside the jail.
+            self._run(["mount", "-t", "nullfs", "-o", "ro",
+                       str(blob_parent), str(mount_input)], timeout=30)
+            mount_cleanup.append(mount_input)
+            self._run(["mount", "-t", "nullfs", "-o", "rw",
+                       str(output_resolved), str(mount_output)], timeout=30)
+            mount_cleanup.append(mount_output)
+
+            # Create the throwaway jail
+            # No mount.devfs: the extraction jail only needs filesystem access
+            # (nullfs for input/output), not device nodes.  Removing devfs
+            # eliminates the need for /dev in the template directory and
+            # reduces the kernel attack surface inside the jail.
+            rc = subprocess.run([
+                "jail", "-c",
+                f"name={jail_name}",
+                f"path={template}",
+                "ip4=disable",
+                "ip6=disable",
+                "persist",
+            ], capture_output=True, text=True, timeout=30)
+            if rc.returncode != 0:
+                raise StoreError(
+                    f"extraction jail creation failed: {rc.stderr.strip() or rc.stdout.strip()}"
+                )
+
+            # Run bsdtar inside the jail as nobody
+            r = subprocess.run([
+                "jexec", jail_name,
+                "/usr/bin/bsdtar", "-xf",
+                f"/mnt/input/{layer_blob.name}",
+                "-C", "/mnt/output",
+                "--no-same-owner",
+                "--no-xattrs",
+            ], capture_output=True, text=True, timeout=DEFAULT_EXTRACT_TIMEOUT_S)
+
+            # Remove jail regardless of bsdtar outcome
+            subprocess.run(["jail", "-r", jail_name], capture_output=True, timeout=30)
+
+            if r.returncode != 0:
+                raise StoreError(
+                    f"bsdtar inside extraction jail failed (rc={r.returncode}): "
+                    f"{r.stderr.strip() or r.stdout.strip()}"
+                )
+
+        finally:
+            # Unmount in reverse order, best-effort
+            for mp in reversed(mount_cleanup):
+                subprocess.run(["umount", "-f", str(mp)], capture_output=True, timeout=30)
+                try:
+                    mp.rmdir()
+                except OSError:
+                    pass
+    # _extract_layer_in_jail:end
 
     # ------------------------------------------------------------------
     # OCI / content-addressing helpers

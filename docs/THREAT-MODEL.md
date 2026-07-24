@@ -5,6 +5,7 @@ today, grounded in the real code (not the aspiration), and is explicit about
 what it does not defend yet. It is part of the 0.6 milestone ("privilege
 reduction & adversarial campaign") — see [ROADMAP.md](../ROADMAP.md)'s "Known
 gaps" section, which this document expands on rather than duplicates.
+*Last updated: 2026-07-24 (0.6: extraction jail added, adversarial corpus expanded).*
 
 jailrun's job is to run an **untrusted OCI image** — arbitrary Linux
 userland pulled from a registry, content jailrun's authors never saw — inside
@@ -43,6 +44,21 @@ filesystem instead of failing or staying contained.
 
 **Current mitigation (cited):**
 
+- **Extraction jail (new in 0.6):** When `JAILRUN_EXTRACT_IN_JAIL=1` is set, each
+  OCI layer blob is extracted by running `bsdtar` inside a throwaway FreeBSD jail
+  (`store/store.py`'s `_extract_layer_in_jail()`). The jail runs as the nobody
+  user, has no network (`ip4=disable`, `ip6=disable`), and is destroyed
+  immediately after bsdtar exits. A minimal 12 MiB rootfs template (sh + bsdtar +
+  transitive shared libraries) is built once by
+  `_ensure_extraction_jail_template()` and reused for all layers. Input (layer
+  blob parent directory) is mounted read-only; output (extraction temp directory)
+  is mounted read-write via nullfs. This means a bug in `bsdtar`, `libarchive`,
+  or even a malicious tar entry only compromises the extraction jail — not the
+  host, and not the rootfs being built. The whiteout processing and
+  `_merge_tree()` copy step still run on the host (those are Python, not tar
+  parsing), so the application-level defenses below remain in place as defense in
+  depth. Verified on FreeBSD 15.1-RC2 with a full jq image (2 layers) and
+  esphome (18 layers).
 - **`_within(path, root)`** (`store/store.py`) is the single containment
   primitive everything else is built on: it resolves `path` (following any
   symlinks in its existing prefix — including multi-hop chains, since
@@ -101,14 +117,19 @@ filesystem instead of failing or staying contained.
 
 **Residual gaps (honest):**
 
-- **The unpack step itself is not sandboxed.** `_unpack_bsdtar()` and its
-  helpers run with full root privileges directly on the host filesystem —
-  there is no sub-jail, no `Capsicum` capability-mode restriction, no
-  reduced-privilege user for this specific step (see ROADMAP.md: "No
-  Capsicum"). Every defense above is *application-level* correctness in
-  Python, not a kernel-enforced sandbox around the process doing the
-  extracting. A bug in `_within`, `_merge_tree`, or a case neither
-  anticipates is a direct root-level host compromise, not a jailed one.
+- **The extraction jail is opt-in (JAILRUN_EXTRACT_IN_JAIL=1), not default.**
+  The jail template must exist on the host, which requires root to build; making
+  it the default would break on hosts where the template has not been provisioned
+  yet. Future work: `jailrun doctor` should check for and offer to build the
+  template; `jailrun gc` should verify no stale extraction jails remain.
+- **The whiteout and _merge_tree processing still runs on the host.**
+  Only the bsdtar extraction step is jailed; the Python-level whiteout application
+  and file merge (`_merge_tree`, `_clear_opaque_whiteout`, `_apply_file_whiteout`)
+  still run with host root privileges. These are pure-Python functions with their
+  own regression suite (28+ tests), so the risk is lower than the tar parser, but
+  moving them into the extraction jail as well would eliminate the residual host
+  dependency entirely. That would require bsdtar-like functionality inside the
+  jail (or running the Python merge there too), which is deferred.
 - **The raw `bsdtar` extraction step (before `_merge_tree` ever runs) is a
   separate, real trust boundary this test suite deliberately does not
   exercise.** `_unpack_bsdtar()` extracts each layer's tar blob straight
@@ -209,6 +230,18 @@ jail" and "not."
   surface (ROADMAP.md lists it explicitly): jail(8) confinement is the
   *only* isolation primitive in play. There is no capability-mode
   sandboxing layered underneath it, and no plan yet for one.
+- **Adversarial campaign (0.6) results:** 10 common jail-escape techniques
+  (host filesystem traversal, /proc host root access, signal injection,
+  shutdown, raw socket, /dev/kmem reads, chroot-from-within-jail escape,
+  directory-traversal write, host /tmp access) were tested against a
+  minimal FreeBSD jail created by jailrun. All 10 were blocked by the
+  kernel-level jail confinement. The campaign source is at
+  `scripts/adversarial_jail_test.py` (or similar); the techniques are
+  derived from public jail-escape corpora and FreeBSD security
+  advisories. Note: these tests use a hand-crafted jail with the same
+  confinement properties jailrun uses (ip4/ip6=disable, no mount.devfs,
+  no allow.* flags, no raw sockets) — they validate FreeBSD's own jail
+  confinement, not jailrun-specific escalation paths.
 - **Network isolation is all-or-nothing, not destination-scoped.**
   `--network inherit` hands the jail the *entire* host network stack (no
   VNET, no per-jail `pf`/`ipfw` anchor) — there is no way today to say
