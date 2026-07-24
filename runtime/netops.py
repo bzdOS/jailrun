@@ -65,9 +65,16 @@ def detect_ext_if() -> str | None:
 # detect_ext_if:end
 
 
+PF_ANCHOR_ROOT = "jailrun"
+PF_CONF = "/etc/pf.conf"
+
+
 def _ensure_loopback() -> None:
-    """Create LO_IFACE if it doesn't exist (idempotent — 'already exists' is fine)."""
-    _run(["ifconfig", LO_IFACE, "create"], check=False)
+    """Create LO_IFACE if it doesn't exist (idempotent — checks first)."""
+    proc = _run(["ifconfig", LO_IFACE], check=False)
+    if proc.returncode != 0:
+        _run(["ifconfig", LO_IFACE, "create"], check=False)
+        _run(["ifconfig", LO_IFACE, "up"], check=False)
 
 
 # add_alias:start
@@ -107,11 +114,39 @@ def flush_anchor(jail_name: str) -> None:
 # flush_anchor:end
 
 
+def _ensure_anchor_wired() -> None:
+    """Ensure /etc/pf.conf has the anchor hooks for jailrun sub-anchors.
+
+    Checks for ``anchor "jailrun/*"`` and ``nat-anchor "jailrun/*"`` and
+    appends them before the first ``apply_network()`` call if absent.
+    Runs ``pfctl -f`` to reload.
+
+    Safe to call repeatedly — if both hooks already present it's a no-op.
+    """
+    try:
+        conf = Path(PF_CONF).read_text()
+    except OSError:
+        conf = ""
+    needed: list[str] = []
+    if f'nat-anchor "{PF_ANCHOR_ROOT}/*"' not in conf:
+        needed.append(f'nat-anchor "{PF_ANCHOR_ROOT}/*"')
+    if f'anchor "{PF_ANCHOR_ROOT}/*"' not in conf:
+        needed.append(f'anchor "{PF_ANCHOR_ROOT}/*"')
+    if not needed:
+        return
+    lines = conf.rstrip().splitlines()
+    lines.extend(needed)
+    Path(PF_CONF).write_text("\n".join(lines) + "\n")
+    _run(["pfctl", "-f", PF_CONF], check=True)
+    log.info("anchored %s into %s", needed, PF_CONF)
+
+
 # apply_network:start
 #   purpose: provision a jail's network before `jail -c` — add its IP alias and
 #            load its pf sub-anchor. Raises on failure (apply is load-bearing:
 #            a half-applied policy is worse than none, so the run aborts).
 def apply_network(jail_name: str, jail_ip: str, rules_text: str) -> None:
+    _ensure_anchor_wired()
     add_alias(jail_ip)
     load_anchor(jail_name, rules_text)
     log.info("network policy applied for jail %s (ip %s)", jail_name, jail_ip)

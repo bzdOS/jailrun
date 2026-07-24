@@ -1314,7 +1314,7 @@ async def _run_async(
             mounts=[],  # user -v volumes are mounted directly by store.mount() (step 4c)
             extra_params=[],
             linuxulator=linuxulator,
-            network=network,
+            network="allow" if _network_spec else network,
             allow_raw_sockets=allow_raw_sockets,
             ip4_addr=_jail_ip,
         )
