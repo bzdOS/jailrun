@@ -522,6 +522,13 @@ class Store:
         str
             ``image_id`` suitable for passing to ``unpack()``.
         """
+        # Local image check: if image_ref is a 64-char hex string (an image_id),
+        # check the local images tree before attempting a registry pull.
+        if re.match(r"^[a-f0-9]{64}$", image_ref):
+            if self._image_exists_locally(image_ref):
+                log.info("resolve: local image %s (skipped pull)", image_ref)
+                return image_ref
+
         with self._image_lock(image_ref):
             oci_dir = self._oci_dir_for(image_ref)
             oci_dir.mkdir(parents=True, exist_ok=True)
@@ -710,6 +717,13 @@ class Store:
         return Path(snapshot_id)
     # base_mountpoint:end
 
+    # _image_exists_locally: check whether an image_id exists in the local images tree
+    def _image_exists_locally(self, image_id: str) -> bool:
+        """Return True if image_id is already present in the local store."""
+        if self.backend == BACKEND_ZFS:
+            return self._zfs_snapshot_exists(f"{self._images_ds}/{image_id}@snap")
+        return (Path(self._images_ds) / image_id / ".jailrun_snap").exists()
+
     # base_snapshot:start
     #   purpose: resolve a pre-provisioned NATIVE base by human name to a
     #            clone-source snapshot_id, for use as a run's ROOT rootfs
@@ -782,7 +796,57 @@ class Store:
             return self._clone_plaindir(snapshot_id)
     # clone:end
 
-    # empty_rootfs:start
+    # commit_image:start
+    #   purpose: create a new image from a run's current state (ZFS snapshot +
+    #            register in the images tree), like `docker commit`
+    #   input:
+    #     dataset: str — full ZFS dataset name of the run (e.g. 'jailrun/runs/<id>')
+    #     image_ref: str | None — optional human-readable tag for the new image,
+    #                e.g. 'myapp:built'. If None, a random image_id is generated.
+    #   output:
+    #     image_id: str — the new image's content-addressable id
+    #   sideEffects: ZFS path: zfs snapshot <dataset>@commit-<hash>,
+    #                zfs clone <dataset>@commit-<hash> <images_ds>/<new_id>,
+    #                zfs snapshot <images_ds>/<new_id>@snap,
+    #                zfs set readonly=on <images_ds>/<new_id>
+    #   rationale: the run's ZFS clone holds all changes the jailed command made
+    #              (compiled artifacts, installed packages, modified configs).
+    #              Snapshotting it and registering the snapshot under <images_ds>
+    #              makes the committed state available as a base for future runs.
+    def commit_image(self, dataset: str, image_ref: str | None = None) -> str:
+        """Create a new image from a run's current state. Returns the image_id."""
+        if self.backend != BACKEND_ZFS:
+            raise NotImplementedError("commit_image is only supported on ZFS backend")
+
+        # Use the image_ref or a random UUID for the snap name
+        snap_tag = _safe_zfs_name(image_ref) if image_ref else uuid.uuid4().hex[:16]
+        commit_snap = f"{dataset}@{snap_tag}"
+
+        # 1. Snapshot the run's dataset
+        self._run(["zfs", "snapshot", commit_snap])
+
+        # 2. Compute a content-addressable image_id from the snapshot name + time
+        raw = f"{commit_snap}:{time.time()}"
+        image_id = _sha256_str(raw)
+
+        # 3. Clone to the images tree
+        image_ds = f"{self._images_ds}/{image_id}"
+        self._run([
+            "zfs", "clone",
+            "-o", f"mountpoint={self.mountpoint_base / 'images' / image_id}",
+            commit_snap,
+            image_ds,
+        ])
+
+        # 4. Snapshot and make read-only (matching unpack()'s image format)
+        self._run(["zfs", "snapshot", f"{image_ds}@snap"])
+        self._run(["zfs", "set", "readonly=on", image_ds])
+
+        log.info(
+            "commit: %s -> image %s (ref=%s)", dataset, image_id, image_ref or "(auto)",
+        )
+        return image_id
+    # commit_image:end
     #   purpose: create an EMPTY writable directory as a run's rootfs, for the
     #            thin-jail mode — the caller (engine.py) is expected to nullfs-ro
     #            bind the actual base userland dirs (/bin, /lib, /libexec, /sbin,

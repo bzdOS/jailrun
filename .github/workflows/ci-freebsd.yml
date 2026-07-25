@@ -1,0 +1,57 @@
+name: CI (FreeBSD + jailrun)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test-freebsd-jailrun:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.FREEBSD_SSH_KEY }}" > ~/.ssh/freebsd_key
+          chmod 600 ~/.ssh/freebsd_key
+          ssh-keyscan -H ${{ secrets.FREEBSD_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Sync code to FreeBSD host
+        run: |
+          tar czf - \
+            --exclude='.git' --exclude='__pycache__' --exclude='.pytest_cache' --exclude='dist/' \
+            --exclude='*.pyc' \
+            . | ssh -i ~/.ssh/freebsd_key ${{ secrets.FREEBSD_USER }}@${{ secrets.FREEBSD_HOST }} \
+            "sudo rm -rf /tmp/jailrun-ci && sudo mkdir -p /tmp/jailrun-ci && sudo tar xzf - -C /tmp/jailrun-ci"
+
+      - name: Install pytest on FreeBSD host
+        run: |
+          ssh -i ~/.ssh/freebsd_key ${{ secrets.FREEBSD_USER }}@${{ secrets.FREEBSD_HOST }} \
+            "su -m root -c 'pkg install -y py312-pytest py312-sqlite3 py312-jsonschema' 2>&1 || true"
+
+      - name: Run tests natively on FreeBSD
+        run: |
+          ssh -i ~/.ssh/freebsd_key ${{ secrets.FREEBSD_USER }}@${{ secrets.FREEBSD_HOST }} \
+            "cd /tmp/jailrun-ci && \
+             sudo PYTHONPATH=/tmp/jailrun-ci /usr/local/bin/python3.12 -m pytest -q \
+               --ignore=bench -c /dev/null -p no:cacheprovider 2>&1"
+
+      - name: Run command inside jailrun jail (dogfooding)
+        run: |
+          ssh -i ~/.ssh/freebsd_key ${{ secrets.FREEBSD_USER }}@${{ secrets.FREEBSD_HOST }} \
+            "cd /tmp/jailrun-ci && \
+             sudo PYTHONPATH=/tmp/jailrun-ci /usr/local/bin/python3.12 -m runtime.cli run --rm \
+               python:3.9-slim \
+               python3 -c 'import sys; print(f\"jailrun CI: Python {sys.version_info.major}.{sys.version_info.minor} inside jail\")' 2>&1"
+
+      - name: Verify DNS works inside jail
+        run: |
+          ssh -i ~/.ssh/freebsd_key ${{ secrets.FREEBSD_USER }}@${{ secrets.FREEBSD_HOST }} \
+            "cd /tmp/jailrun-ci && \
+             sudo PYTHONPATH=/tmp/jailrun-ci /usr/local/bin/python3.12 -m runtime.cli run --rm \
+               --network inherit \
+               python:3.9-slim \
+               python3 -c 'import socket; print(\"DNS:\", socket.gethostbyname(\"example.com\"))' 2>&1"

@@ -1,9 +1,9 @@
 # jailrun — Usage
 
-This covers the four commands jailrun currently ships: `run`, `explain`, `doctor`,
-`version`. (`ps` and `logs` read from the run-state SQLite database and are
-documented briefly below; the jail lifecycle verbs `freeze`/`thaw` use native
-`jexec kill` — see `runtime/lifecycle.py`.)
+This covers the commands jailrun currently ships: `run`, `exec`, `ps`, `logs`,
+`stop`, `rm`, `wait`, `explain`, `doctor`, `version`, and `gc`. The jail
+lifecycle verbs `freeze`/`thaw` use native `jexec kill` — see
+`runtime/lifecycle.py`.
 
 Every example below is real output captured by actually running the command —
 see the "how to reproduce" note under each one.
@@ -11,12 +11,19 @@ see the "how to reproduce" note under each one.
 ## What needs FreeBSD, and what doesn't
 
 | Command | Needs a FreeBSD 15+ host? | Why |
-|---|---|---|
+|---|---|---|---|
 | `jailrun version` | No | Prints static strings. |
 | `jailrun doctor` | No | The whole point is to run *anywhere* and tell you what's missing; FreeBSD-only checks report `fail`/`skip` on other OSes instead of crashing. |
 | `jailrun explain --manifest FILE` | No | Pure read + render over a JSON file already on disk — no subprocess, no jail/ZFS calls. |
 | `jailrun explain IMAGE` | Yes | Resolves the manifest by running the same resolve → unpack → clone pipeline as `run` (skopeo, ZFS clone, probe). |
-| `jailrun run` | Yes | Pulls the image (skopeo), unpacks/clones it on ZFS, and spawns a real `jail(8)` + `jexec`. None of that exists outside FreeBSD. |
+| `jailrun run` (foreground) | Yes | Pulls the image (skopeo), unpacks/clones it on ZFS, and spawns a real `jail(8)` + `jexec`. None of that exists outside FreeBSD. |
+| `jailrun run -d` (detached) | Yes | Same as foreground, but the jexec runs in a background worker process (see `runtime/runner.py`). |
+| `jailrun exec` | Yes | `jexec(8)` into an already-running jail — requires a live FreeBSD jail. |
+| `jailrun ps` | Yes (reads) | Reads the run-state SQLite database (`/var/db/jailrun/runs.db`). The db path is readable on any host, but on Linux the table is simply empty. |
+| `jailrun logs` | Yes (reads) | Same db dependency as `ps`; reads a log file path from rundb and dumps its contents. |
+| `jailrun stop` | Yes | Runs `jexec kill -KILL -1` + `jail -r` + updates the rundb. |
+| `jailrun rm` | Yes | Destroys a ZFS clone / plaindir copy — requires the store backend. |
+| `jailrun wait` | No | Pure file read + polling loop; follows a log file and checks jls liveness. Harmless on Linux (reads the log file from rundb, jls returns False). |
 
 You can clone the repo and edit/test on Linux or macOS — `py_compile` and the unit
 tests don't touch FreeBSD-only code paths. See
@@ -39,17 +46,23 @@ says a binary needs it.
 ### Flags
 
 | Flag | Argument | Default | Description |
-|---|---|---|---|
+|---|---|---|---|---|
 | `--rm` | — | off | Automatically remove the rootfs clone when the container exits |
+| `-d`, `--detach` | — | off | Run the jail in background (detached). Prints the jail name and returns immediately. Use `jailrun ps`, `jailrun logs`, `jailrun stop` to manage it |
+| `--name` | `NAME` | auto (`jailrun-<uuid>`) | Assign a human-readable name to the jail (replaces the auto-generated name). Duplicate names are rejected with a clear error |
 | `-v`, `--volume` | `HOST:CTR[:ro]` (repeatable) | none | Bind-mount HOST path into the jail at CTR path (nullfs). Append `:ro` for read-only |
 | `-e`, `--env` | `KEY=VALUE` (repeatable) | none | Set environment variable inside the jail |
 | `-w`, `--workdir` | `DIR` | none | Working directory inside the jail |
 | `--timeout` | `SECONDS` | engine default (`DEFAULT_JEXEC_TIMEOUT_S`, 1800s) | Kill the jexec'd command after this many seconds. Real builds (esp-idf/platformio toolchain fetch + compile) can need more |
-| `--network` | `none` \| `inherit` | `none` | `none`: no network inside the jail (ip4/ip6 disabled) — package/toolchain provisioning already happens on the host before the jail is created. `inherit`: opt-in, shares the host's network stack — only for commands that genuinely need registry/network access at exec time |
+| `--cpus` | `N` (float) | none | CPU core limit (e.g. `--cpus=2`). Maps to `cputime:sigkill` rctl rule (N × 3600 CPU-seconds). Does NOT merge with `--rctl-rule` |
+| `--memory` | `SIZE` | none | Memory limit (e.g. `--memory=4g`, `--memory=512m`). Maps to `memoryuse:sigkill` rctl rule. Overrides the built-in 8g default when used alone; replaces all defaults when combined with `--rctl-rule` |
+| `--network` | `none` \| `inherit` \| `vnet` | `none` | `none`: no network inside the jail (ip4/ip6 disabled) — package/toolchain provisioning already happens on the host before the jail is created. `inherit`: opt-in, shares the host's network stack — only for commands that genuinely need registry/network access at exec time. `vnet`: per-jail virtual network stack with dedicated epair(4) interface and private IP — full network isolation |
 | `--allow-raw-sockets` | — | off | Allow raw sockets inside the jail (e.g. for ping-like diagnostics). Jails are plain (no VNET), so this is host-network-wide |
 | `--no-rctl` | — | rctl **on** by default | Disable rctl resource limits (CPU/memory/process/disk-IO) |
 | `--rctl-rule` | `ACTION:VALUE` (repeatable) | built-in defaults | Override the default rctl rule set, e.g. `--rctl-rule pcpu:deny=200 --rctl-rule memoryuse:deny=4g`. Replaces (does not merge with) the built-in defaults |
-| `-it` | — | off | Allocate a pseudo-TTY and keep stdin open (**not yet implemented — errors if used**) |
+| `-it` | — | off | Allocate a pseudo-TTY and keep stdin open. Forwards terminal keystrokes to the jailed process and displays its output as if connected directly to the terminal (like `docker run -it`) |
+| `--read-only` | — | off | Mount the rootfs dataset read-only. Combine with `--tmpfs` for writable temp directories |
+| `--tmpfs` | `PATH[:SIZE]` (repeatable) | none | Mount a tmpfs at `PATH` inside the jail. Optionally append `:SIZE` (e.g. `--tmpfs /tmp:512m`). Default size is 128m. Useful with `--read-only` |
 
 Positional: `IMAGE` (required, e.g. `alpine:3.19` or `esphome/esphome:2025.5`),
 then `CMD` (everything after IMAGE, passed straight through as argv inside the
@@ -75,6 +88,199 @@ below tells you exactly what's missing), `run` pulls the image, clones a ZFS
 snapshot, spawns the jail, and streams stdout/stderr with the real exit code —
 see the README's ESP32 firmware example for what a full successful run looks
 like end to end.
+
+---
+
+## Daemon mode — `run -d`
+
+```
+jailrun run -d [--name NAME] [FLAGS] IMAGE [CMD [ARGS...]]
+```
+
+Runs `CMD` in the background (detached). The jail is created, the command is
+exec'd via `jexec` inside a background worker process (`runtime/runner.py`),
+and the CLI prints the jail name and returns immediately.
+
+### Example: detached run
+
+```
+$ jailrun run -d --name mybuild alpine:3.19 sh -c 'for i in 1 2 3; do echo line $i; sleep 1; done'
+mybuild
+```
+
+The shell prompt returns instantly. The command runs in the background.
+
+---
+
+## `jailrun ps`
+
+```
+jailrun ps [--all]
+```
+
+List jailrun-managed runs from the run-state SQLite database. Shows only
+`running` rows by default; pass `--all` to include exited/killed history.
+
+### Example
+
+```
+$ jailrun ps
+JAIL       IMAGE         STATUS    STARTED
+mybuild    alpine:3.19   running   2026-07-24T23:19:44+00:00
+```
+
+---
+
+## `jailrun logs`
+
+```
+jailrun logs JAIL_NAME
+```
+
+Print a run's captured stdout/stderr, looked up via the run-state db's
+`log_path` column — the same way `docker logs` retrieves a container's output
+after the fact.
+
+| Flag | Argument | Default | Description |
+|---|---|---|---|
+| `-f`, `--follow` | — | off | Follow log output in real time (like `tail -f`). Exits when the jail stops |
+
+### Example
+
+```
+$ jailrun logs mybuild
+line 1
+line 2
+line 3
+```
+
+---
+
+## `jailrun exec`
+
+```
+jailrun exec [FLAGS] JAIL_NAME CMD [ARGS...]
+```
+
+Run an additional command inside an already-running jail (docker-exec
+semantics). The jail must be live (verified via `jls -n`). Creates or destroys
+nothing.
+
+| Flag | Argument | Default | Description |
+|---|---|---|---|
+| `-e`, `--env` | `KEY=VALUE` (repeatable) | none | Set environment variable for this exec'd command |
+| `-w`, `--workdir` | `DIR` | none | Working directory inside the jail for this exec'd command |
+| `--timeout` | `SECONDS` | engine default (1800s) | Kill this exec'd command after this many seconds |
+| `-d`, `--detach` | — | off | Run the command in background. Output goes to the jail's log file |
+
+### Example
+
+```
+$ jailrun exec mybuild echo hello from exec
+hello from exec
+```
+
+---
+
+## `jailrun stop`
+
+```
+jailrun stop [--rm] JAIL_NAME
+```
+
+Stop a running jail: SIGKILL all processes (via `jexec kill -KILL -1`), remove
+the persist jail (`jail -r`), and update the run-state db to status=`killed`.
+
+| Flag | Argument | Default | Description |
+|---|---|---|---|
+| `--rm` | — | off | Also destroy the clone/rootfs dataset after stopping |
+
+Without `--rm`, the dataset is preserved for later cleanup via `jailrun rm` or
+`jailrun gc --fix`.
+
+### Example
+
+```
+$ jailrun stop --rm mybuild
+jailrun: stopped mybuild
+```
+
+---
+
+## `jailrun rm`
+
+```
+jailrun rm JAIL_NAME
+```
+
+Destroy the ZFS clone or plaindir copy backing a stopped jail. The jail must
+NOT be running (stop it first with `jailrun stop`). Does not modify the
+run-state db entry itself.
+
+### Example
+
+```
+$ jailrun rm mybuild
+jailrun: removed mybuild (jailrun/runs/bb366b37390e433bbfe569da21dbcfaf)
+```
+
+---
+
+## `jailrun wait`
+
+```
+jailrun wait JAIL_NAME
+```
+
+Tail -f of a jail's log file. Reads from the beginning and follows live output
+until the jail stops or the user presses Ctrl-C. Like `docker attach` but
+read-only (no stdin forwarding).
+
+### Example
+
+```
+$ jailrun wait mybuild
+line 1
+line 2
+line 3
+```
+
+---
+
+## `jailrun inspect`
+
+```
+jailrun inspect [--format text|json] JAIL_NAME
+```
+
+Print detailed information about a jail as JSON: run-state (from the rundb),
+live status (from `jls -n`), and store backend information — the same shape
+as `docker inspect`.
+
+### Example
+
+After the jail has exited (live=false):
+
+```json
+$ jailrun inspect mybuild
+{
+  "jail_name": "mybuild",
+  "live": false,
+  "rundb": {
+    "image": "alpine:3.19",
+    "image_digest": "jailrun/images/...",
+    "dataset": "jailrun/runs/...",
+    "status": "exited",
+    "exit_code": 0,
+    "started_at": "2026-07-24T23:19:44+00:00",
+    "ended_at": "2026-07-24T23:19:47+00:00",
+    "log_path": "/var/log/jailrun/mybuild.log"
+  }
+}
+```
+
+JSON format is the default; `--format text` is accepted but currently outputs
+the same JSON.
 
 ---
 

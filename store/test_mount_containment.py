@@ -78,6 +78,13 @@ def test_normal_dest_still_mkdirs_inside_rootfs():
             assert "resolves outside" not in str(exc), f"containment guard rejected a valid path: {exc}"
         # Regardless of whether mount_nullfs itself succeeded, mkdir must have happened.
         assert (rootfs / "mnt" / "work").is_dir()
+        # Cleanup: unmount any mounts before the temp dir is torn down
+        # (otherwise rmdir fails with "Device busy" on FreeBSD where the
+        # mount actually succeeded).
+        try:
+            s.unmount(handle)
+        except Exception:
+            pass
 
 
 TESTS = [

@@ -1,5 +1,5 @@
 PORTNAME=	jailrun
-DISTVERSION=	1.0.0.b1
+DISTVERSION=	1.0.0.a2
 CATEGORIES=	sysutils python
 
 MAINTAINER=	ap.bodrov@gmail.com
@@ -20,7 +20,7 @@ SHEBANG_FILES=	bin/jailrun
 USE_GITHUB=	yes
 GH_ACCOUNT=	bzdOS
 GH_PROJECT=	jailrun
-GH_TAGNAME=	v${PORTVERSION}
+GH_TAGNAME=	v1.0.0-alpha.2
 
 NO_ARCH=	yes
 

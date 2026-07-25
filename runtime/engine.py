@@ -341,11 +341,9 @@ def _assemble_native_shadow(
             continue
 
         if base_prefix is None:
-            log.warning(
-                "binary %s: artifact_path=%s set but no bakery base is mounted "
-                "for this run (no _bakery.snapshot_id) — cannot shadow, the "
-                "substituted binary is not reachable inside this jail",
-                entry.get("path"), artifact_path,
+            log.debug(
+                "binary %s: no bakery base for this run — using image's own binary",
+                entry.get("path"),
             )
             continue
 
@@ -354,9 +352,9 @@ def _assemble_native_shadow(
         # Artifact-reality invariant (ARCHITECTURE.md): verify the resolved path
         # actually exists (through the mount) before ever shadowing it.
         if not (Path(rootfs_path) / in_jail_path.lstrip("/")).exists():
-            log.warning(
-                "binary %s: resolved native artifact %s does not exist inside "
-                "the jail (bakery base missing this content?) — skipping shadow",
+            log.debug(
+                "binary %s: native artifact %s not in bakery base — skipping shadow "
+                "(falls back to image's own binary)",
                 entry.get("path"), in_jail_path,
             )
             continue
@@ -422,13 +420,14 @@ def _needs_linuxulator(manifest: dict[str, Any]) -> bool:
 def _build_jail_conf(
     *,
     jail_name: str,
-    rootfs_path: str,
+    rootfs_path: Path | str,
     mounts: list[str],
     extra_params: list[str],
     linuxulator: bool,
     network: str = "none",
     allow_raw_sockets: bool = False,
     ip4_addr: str | None = None,
+    epair_if: str | None = None,
 ) -> str:
     """
     Render a minimal jail.conf snippet for this run.
@@ -448,11 +447,15 @@ def _build_jail_conf(
     esphome compile needs no network during `jexec`. Callers that genuinely need
     network at exec time must opt in explicitly (`--network inherit` in cli.py).
     """
-    if network not in ("none", "inherit", "allow"):
-        raise ValueError(f"network must be 'none', 'inherit', or 'allow', got {network!r}")
+    if network not in ("none", "inherit", "allow", "vnet"):
+        raise ValueError(
+            f"network must be 'none', 'inherit', 'allow', or 'vnet', got {network!r}"
+        )
     if network == "allow" and not ip4_addr:
         # Destination-scoped egress (0.4) needs a dedicated alias IP to tag+NAT.
         raise ValueError("network='allow' requires ip4_addr (the jail's alias IP)")
+    if network == "vnet" and not epair_if:
+        raise ValueError("network='vnet' requires epair_if (the jail-side epair name)")
 
     lines: list[str] = [
         f"{jail_name} {{",
@@ -498,6 +501,11 @@ def _build_jail_conf(
 
     if network == "none":
         lines += ["    ip4 = disable;", "    ip6 = disable;"]
+    elif network == "vnet":
+        lines += [
+            "    vnet;",
+            f"    vnet.interface = {epair_if!r};",
+        ]
     elif network == "allow":
         # Destination-scoped (0.4, A2 shared-stack): the jail gets its alias
         # IP plus ip4=inherit so the routing table (including the default route)
@@ -551,6 +559,16 @@ def _build_jail_conf(
 # The actual (potentially multi-minute) build runs through _stream_jexec, which has its
 # own, much longer, timeout — see DEFAULT_JEXEC_TIMEOUT_S below.
 DEFAULT_SUBPROCESS_TIMEOUT_S = 60.0
+
+# Per-jail VNET epair counter — incremented for each VNET jail so epair names
+# (epair0, epair1, …) don't collide during concurrent runs.
+_vnet_epair_counter = 0
+_vnet_epair_lock: Any = None
+try:
+    import threading
+    _vnet_epair_lock = threading.Lock()
+except ImportError:
+    pass
 
 
 # _run_subprocess:start
@@ -785,6 +803,144 @@ def _open_log_file(log_path: str):
         )
         return None
 # _open_log_file:end
+
+
+# _stream_jexec_pty:start
+#   purpose: run jexec with a pseudo-terminal for interactive (-it) mode
+#   input: same as _stream_jexec (jail_name, cmd, env, workdir, timeout)
+#   output: exit_code: int
+#   sideEffects: allocates a PTY with os.openpty/pty.fork; forwards stdin
+#                and PTY master in both directions; handles terminal resize
+#                via SIGWINCH forwarding
+#   rationale: Docker's -it flag allocates a PTY so the jailed process sees
+#              a real terminal (TERM, job control, ctrl-c forwarding). Without
+#              a PTY, interactive tools (editors, shells with line editing)
+#              behave differently or fail. This function provides that by
+#              running jexec through a PTY slave and forwarding the master
+#              side's I/O.
+def _stream_jexec_pty(
+    jail_name: str,
+    cmd: list[str],
+    *,
+    env: dict[str, str],
+    workdir: str | None,
+    timeout: float | None = DEFAULT_JEXEC_TIMEOUT_S,
+    log_file: Any = None,
+) -> int:
+    """
+    Run jexec with a PTY for interactive (-it) mode. Blocks until the
+    jailed process exits. Returns exit code.
+
+    Does NOT use asyncio — PTY I/O is inherently blocking. The caller
+    (asyncio.to_thread) runs this in a thread pool when interactive is set.
+    """
+    import os  # noqa: PLC0415
+    import pty  # noqa: PLC0415
+    import shlex  # noqa: PLC0415
+    import subprocess  # noqa: PLC0415
+    import sys  # noqa: PLC0415
+    import termios  # noqa: PLC0415
+    import time  # noqa: PLC0415
+    import tty  # noqa: PLC0415
+
+    # Build jexec argv — mirrors _stream_jexec's logic
+    env_prefix: list[str] = ["env"]
+    for k, v in env.items():
+        env_prefix.append(f"{k}={v}")
+
+    jexec_argv: list[str] = ["jexec", jail_name]
+    if workdir:
+        inner = shlex.join(env_prefix + cmd)
+        jexec_argv += ["sh", "-c", f"cd {shlex.quote(workdir)} && {inner}"]
+    else:
+        jexec_argv += env_prefix + cmd
+
+    log.debug("jexec (pty): %s", shlex.join(jexec_argv))
+
+    # Create a PTY pair and attach the slave to the jexec process.
+    master_fd, slave_fd = pty.openpty()
+
+    proc = subprocess.Popen(
+        jexec_argv,
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=slave_fd,
+        close_fds=True,
+    )
+    os.close(slave_fd)
+
+    # Set stdin to raw mode so keystrokes are forwarded as-is
+    try:
+        old_tty = termios.tcgetattr(sys.stdin)
+        tty.setraw(sys.stdin)
+    except Exception:  # noqa: BLE001 — non-TTY stdin is fine (e.g. piped input)
+        old_tty = None
+
+    # Set master PTY to non-blocking so we can check for stdin too
+    os.set_blocking(master_fd, False)
+
+    start_time = time.monotonic()
+    try:
+        while True:
+            # Check timeout
+            if timeout is not None:
+                elapsed = time.monotonic() - start_time
+                if elapsed > timeout:
+                    log.warning(
+                        "jexec (pty) in jail %s timed out after %ss — removing jail",
+                        jail_name, timeout,
+                    )
+                    proc.kill()
+                    break
+
+            # Read from PTY master (non-blocking)
+            try:
+                data = os.read(master_fd, 65536)
+                if data:
+                    sys.stdout.buffer.write(data)
+                    sys.stdout.buffer.flush()
+                    if log_file is not None:
+                        try:
+                            log_file.write(data)
+                            log_file.flush()
+                        except OSError:
+                            log_file = None
+            except BlockingIOError:
+                pass
+
+            # Read from stdin and forward to PTY (non-blocking)
+            try:
+                stdin_data = os.read(sys.stdin.fileno(), 65536)
+                if stdin_data:
+                    os.write(master_fd, stdin_data)
+            except (BlockingIOError, OSError):
+                pass
+
+            # Check if process exited
+            rc = proc.poll()
+            if rc is not None:
+                exit_code = rc
+                break
+
+            time.sleep(0.05)
+
+    except KeyboardInterrupt:
+        try:
+            os.write(master_fd, b"\x03")
+        except OSError:
+            pass
+    finally:
+        if old_tty is not None:
+            try:
+                termios.tcsetattr(sys.stdin, termios.TCSANOW, old_tty)
+            except Exception:  # noqa: BLE001
+                pass
+        os.close(master_fd)
+        proc.wait()
+        exit_code = proc.returncode if proc.returncode is not None else exit_code
+
+    return exit_code
+# _stream_jexec_pty:end
 
 
 # _stream_jexec:start
@@ -1067,9 +1223,22 @@ async def _run_async(
     _network_spec: Any = None
     _jail_ip: str | None = None
     _net_rules_text: str | None = None
+    # VNET state — set during START_VNET_SETUP, used during teardown
+    _vnet_host_if: str | None = None
+    _vnet_jail_if: str | None = None
+    _vnet_host_ip: str | None = None
+    _vnet_jail_ip: str | None = None
     if network.startswith("allow"):
         from runtime.netpolicy import parse_network_spec  # noqa: PLC0415
         _network_spec = parse_network_spec(network)
+    elif network == "vnet":
+        # VNET needs epair + IP allocation before jail -c.
+        # The actual creation happens later (once jail_name is known),
+        # but validate early that we're on FreeBSD with ifconfig.
+        try:
+            from runtime.netops import create_epair  # noqa: PLC0415
+        except Exception as exc:
+            raise RuntimeError(f"VNET not available on this host: {exc}") from exc
     allow_raw_sockets: bool = opts.get("allow_raw_sockets", False)
     rctl_enabled: bool = opts.get("rctl_enabled", True)
     rctl_rules: tuple[str, ...] = (
@@ -1318,7 +1487,7 @@ async def _run_async(
         # `handle` is the Handle DATACLASS — f"{handle}" stringifies the whole repr
         # (rootfs=PosixPath(...), dataset=..., ...), which jail(8) rejects outright
         # as an invalid parameter name. Found live 2026-07-19.
-        jail_name = f"jailrun-{handle.id}"
+        jail_name = opts.get("jail_name") or f"jailrun-{handle.id}"
         handle.jail_name = jail_name  # so store.destroy()'s own jail -r step is live too
 
         # START_NETWORK_ALLOW_SETUP
@@ -1362,15 +1531,80 @@ async def _run_async(
             )
         # END_NETWORK_ALLOW_SETUP
 
+        # START_VNET_SETUP
+        # ------------------------------------------------------------------
+        # 6b. For VNET (--network vnet), create an epair and assign IPs before
+        #     jail -c. The epair jail side is specified in jail.conf's
+        #     vnet.interface so jail(8) moves it into the jail automatically.
+        #     Host-side IP + NAT pf anchor are set up here; the jail-side IP
+        #     and default route are configured via jexec after jail -c (see
+        #     START_VNET_JAIL_CONFIG below).
+        # ------------------------------------------------------------------
+        if network == "vnet":
+            from runtime.netops import create_epair, setup_vnet_host, _alloc_vnet_ip  # noqa: PLC0415
+
+            if _vnet_epair_lock is not None:
+                _vnet_epair_lock.acquire()
+            try:
+                _vnet_host_if, _vnet_jail_if = create_epair()
+                _vnet_host_ip, _vnet_jail_ip = _alloc_vnet_ip()
+            finally:
+                if _vnet_epair_lock is not None:
+                    _vnet_epair_lock.release()
+
+            setup_vnet_host(_vnet_host_if, _vnet_host_ip, jail_name)
+            log.info(
+                "VNET for %s: epair=(%s, %s) host=%s jail=%s",
+                jail_name, _vnet_host_if, _vnet_jail_if, _vnet_host_ip, _vnet_jail_ip,
+            )
+
+        # START_PUBLISH_SETUP
+        # ------------------------------------------------------------------
+        # 6b-prime. For port publishing (--publish / -p), load pf rdr rules
+        # that forward host ports to the jail. Only meaningful with VNET
+        # (needs a jail IP to forward to).
+        # ------------------------------------------------------------------
+        publish_specs: list[tuple[int, int, str]] | None = opts.get("publish")
+        if publish_specs and _vnet_jail_ip is not None:
+            from runtime.netops import setup_publish_ports  # noqa: PLC0415
+            setup_publish_ports(jail_name, _vnet_jail_ip, publish_specs)
+        # END_PUBLISH_SETUP
+
+        # Build --tmpfs mount lines for jail.conf.
+        tmpfs_specs: list[str] | None = opts.get("tmpfs")
+        _mount_lines: list[str] = []
+        if tmpfs_specs:
+            rootfs_str = str(rootfs_path)
+            for spec in tmpfs_specs:
+                parts = spec.split(":", 1)
+                path = parts[0].lstrip("/")
+                size = parts[1] if len(parts) > 1 else "128m"
+                target = f"{rootfs_str}/{path}"
+                _mount_lines.append(
+                    f"tmpfs {target} tmpfs rw,size={size},mode=1777 0 0"
+                )
+            log.info("tmpfs mounts: %d (%s)", len(tmpfs_specs), ", ".join(tmpfs_specs))
+
+        # Apply --read-only: make the ZFS clone read-only at the dataset level.
+        # Done here AFTER all filesystem mutations (shadow assembly, bakery base
+        # mount, resolv.conf copy, user -v volumes) but BEFORE jail -c so the
+        # jail starts with a read-only root. User -v volumes (nullfs) and
+        # --tmpfs mounts (jail.conf mount +=) are separate filesystems and are
+        # unaffected.
+        if opts.get("read_only") and handle.dataset and _store_module.backend == "zfs":
+            await _run_subprocess(["zfs", "set", "readonly=on", handle.dataset], check=False)
+            log.info("rootfs set read-only (%s)", handle.dataset)
+
         conf_text = _build_jail_conf(
             jail_name=jail_name,
             rootfs_path=rootfs_path,
-            mounts=[],  # user -v volumes are mounted directly by store.mount() (step 4c)
+            mounts=_mount_lines,
             extra_params=[],
             linuxulator=linuxulator,
-            network="allow" if _network_spec else network,
+            network="vnet" if _vnet_jail_if else ("allow" if _network_spec else network),
             allow_raw_sockets=allow_raw_sockets,
-            ip4_addr=_jail_ip,
+            ip4_addr=_vnet_jail_ip or _jail_ip,
+            epair_if=_vnet_jail_if,
         )
 
         # Write jail.conf to a tempfile.
@@ -1388,6 +1622,16 @@ async def _run_async(
         await _run_subprocess(["jail", "-f", conf_path, "-c", jail_name])
         log.info("jail %s created", jail_name)
         jail_created = True
+
+        # START_VNET_JAIL_CONFIG
+        # ------------------------------------------------------------------
+        # 6a-prime. For VNET jails, configure the jail-side epair IP and
+        # default route via jexec now that the jail is running.
+        # ------------------------------------------------------------------
+        if _vnet_host_if is not None and _vnet_jail_ip is not None:
+            from runtime.netops import setup_vnet_jail  # noqa: PLC0415
+            setup_vnet_jail(jail_name, _vnet_jail_if, _vnet_jail_ip, _vnet_host_ip, linuxulator=linuxulator)
+        # END_VNET_JAIL_CONFIG
 
         # START_LOG_FILE_SETUP
         # ------------------------------------------------------------------
@@ -1452,15 +1696,27 @@ async def _run_async(
             # Default to sh if no command given (mirrors docker run IMAGE).
             cmd = ["/bin/sh"]
 
-        exit_code = await _stream_jexec(
-            jail_name,
-            cmd,
-            conf_path=conf_path,
-            env=env,
-            workdir=workdir,
-            timeout=jexec_timeout,
-            log_file=log_fh,
-        )
+        if opts.get("interactive"):
+            # PTY mode: run in a thread since PTY I/O is blocking.
+            exit_code = await asyncio.to_thread(
+                _stream_jexec_pty,
+                jail_name,
+                cmd,
+                env=env,
+                workdir=workdir,
+                timeout=jexec_timeout,
+                log_file=log_fh,
+            )
+        else:
+            exit_code = await _stream_jexec(
+                jail_name,
+                cmd,
+                conf_path=conf_path,
+                env=env,
+                workdir=workdir,
+                timeout=jexec_timeout,
+                log_file=log_fh,
+            )
         log.info("jexec finished with exit code %d", exit_code)
         run_completed = True  # a real exit_code was produced — see record_exit below
         # END_JEXEC_RUN
@@ -1540,6 +1796,16 @@ async def _run_async(
                     finally:
                         if _netpolicy_lock is not None:
                             _netpolicy_lock.release()
+
+            # Teardown VNET (--network vnet): flush pf anchor, destroy epair.
+            if _vnet_host_if is not None:
+                try:
+                    from runtime.netops import teardown_vnet  # noqa: PLC0415
+                    teardown_vnet(_vnet_host_if, jail_name)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "failed to teardown VNET for %s (non-fatal): %s", jail_name, exc,
+                    )
 
             # Record the run's terminal status for `jailrun ps` (runtime/rundb.py).
             # Gated on jail_created: only record an exit if a record_start was

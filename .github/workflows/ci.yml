@@ -67,6 +67,15 @@ jobs:
       - name: Unit tests (full suite)
         run: python -m pytest -q
 
+      - name: Build jailrun.pyz zipapp
+        run: python3 scripts/build_zipapp.py
+
+      - name: Upload zipapp artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: jailrun-py3${{ matrix.python-version }}-${{ github.sha }}
+          path: dist/jailrun.pyz
+
       - name: Substitution manifest matches its own schema
         run: python .github/scripts/validate_manifest_schema.py
 

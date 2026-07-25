@@ -467,12 +467,17 @@ def _destroy_dataset(dataset: str) -> tuple[bool, str]:
         rc, _out, err = _run_ok(["zfs", "destroy", dataset])
         if rc == 0:
             return True, "zfs destroy succeeded"
+        # Retry with -r (recursive) — the dataset may have child snapshots
+        # from `jailrun commit`.
+        rc2, _out2, err2 = _run_ok(["zfs", "destroy", "-r", dataset])
+        if rc2 == 0:
+            return True, "zfs destroy -r succeeded (with children)"
         # One forced retry — mirrors store.py's destroy() tolerance for the
         # brief "dataset is busy" window right after a jail is removed.
-        rc2, _out2, err2 = _run_ok(["zfs", "destroy", "-f", dataset])
-        if rc2 == 0:
+        rc3, _out3, err3 = _run_ok(["zfs", "destroy", "-f", dataset])
+        if rc3 == 0:
             return True, "zfs destroy -f succeeded (after busy retry)"
-        return False, f"zfs destroy failed (rc={rc}): {err.strip() or err2.strip()}"
+        return False, f"zfs destroy failed (rc={rc}): {err.strip() or err2.strip() or err3.strip()}"
     try:
         shutil.rmtree(dataset)
         return True, "rm -rf succeeded"

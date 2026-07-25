@@ -335,9 +335,8 @@ def resolve_pkg(name: str) -> str:
         return PKG_ARTIFACTS[name]
     # Heuristic: most pkg-installed CLI tools land in /usr/local/bin/
     guessed = f"/usr/local/bin/{name}"
-    log.warning(
-        "pkg:%s not in PKG_ARTIFACTS table; guessing %s. "
-        "Add to PKG_ARTIFACTS when confirmed on freebsd-host.",
+    log.debug(
+        "pkg:%s not in PKG_ARTIFACTS table; guessing %s",
         name, guessed,
     )
     return guessed

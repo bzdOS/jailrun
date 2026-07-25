@@ -2,7 +2,7 @@
 
 **A `docker run`-shaped runtime for FreeBSD — backed by jails, not a daemon.**
 
-![status: 1.0-alpha](https://img.shields.io/badge/status-1.0--alpha-yellow)
+![status: 1.0-alpha.2](https://img.shields.io/badge/status-1.0--alpha.2-yellow)
 ![license: MIT](https://img.shields.io/badge/license-MIT-blue)
 ![platform: FreeBSD](https://img.shields.io/badge/platform-FreeBSD%2015-red)
 [![CI](https://github.com/bzdOS/jailrun/actions/workflows/ci.yml/badge.svg)](https://github.com/bzdOS/jailrun/actions/workflows/ci.yml)
@@ -27,10 +27,21 @@ time**: run native where we can, use Linuxulator only where we must.
 | image (immutable rootfs) | ZFS snapshot, seeded by `pkg`/ports or unpacked OCI layers |
 | `pull` / registry | `skopeo` + `bsdtar` (OCI — `umoci` is not in FreeBSD ports), or `pkg` for native bases |
 | writable layer | `zfs clone` (copy-on-write) |
-| namespaces + cgroups | `jail(2)` (+ VNET) |
+| `run -d` / detached | background worker (`runtime/runner.py`) via JSON job file + `subprocess.Popen` |
+| `exec` | `jexec(8)` (stream stdio, exact return code) |
 | `-v host:ctr` | `mount_nullfs` |
-| logs + exit code | `jexec` as a subprocess (stream stdio, exact return code) |
+| `--cpus` / `--memory` | `rctl(8)` resource limits |
+| `--read-only` / `--tmpfs` | `zfs set readonly=on` / `tmpfs` mount |
+| `-it` interactive | `pty.openpty()` + pseudo-terminal forwarding |
+| `--network` | `none` (default), `inherit`, `allow=host:port` (pf anchor), `vnet` (epair) |
+| `-p HOST:CTR` | pf rdr rules for port forwarding (VNET) |
 | `--rm` | `jail -r` + `zfs destroy` |
+| `commit` | `zfs snapshot` + `zfs clone` to images tree |
+| `cp` | tar over `jexec` |
+| `stats` | `rctl -u` |
+| `inspect` | JSON from rundb + `jls` |
+| `ps` / `logs` / `stop` / `rm` | run-state SQLite db + `jail -r` + `zfs destroy` |
+| `freeze` / `thaw` | `jexec kill -STOP/-CONT -1` |
 
 ## Status: 1.0-alpha
 

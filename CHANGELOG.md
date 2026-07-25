@@ -368,6 +368,103 @@ the pipeline for real; every one of these had sat unexercised through every prio
 
 ### Status
 
+## [1.0.0-alpha.2] - 2026-07-25
+
+The "docker-compatible surface" alpha. Every common `docker run` / `docker exec`
+workflow now has a jailrun equivalent, verified end-to-end on FreeBSD 15.1.
+
+### Added — Daemon mode & container lifecycle
+- **`jailrun run -d [--name NAME]`** — run jails in background (detached).
+  Prints the jail name and returns immediately. Background worker
+  (`runtime/runner.py`) handles the full lifecycle via a JSON job file +
+  `subprocess.Popen`. Duplicate `--name` rejected (checks jls + rundb).
+- **`jailrun stop [--rm] NAME`** — SIGKILL all jail processes (`jexec kill
+  -KILL -1`), remove persist jail (`jail -r`), update rundb. `--rm` also
+  destroys the clone dataset.
+- **`jailrun rm NAME`** — destroy a stopped jail's clone/rootfs dataset.
+  Refuses if the jail is still running.
+- **`jailrun wait NAME`** — tail -f of a jail's log file. Reads from
+  beginning, follows live until the jail stops or Ctrl-C.
+- **`jailrun inspect NAME`** — JSON output with rundb state + live status
+  (jls), like `docker inspect`.
+- **`jailrun logs -f`** — follow mode for `jailrun logs` (tail -f behavior).
+
+### Added — Resource limits & filesystem
+- **`--cpus N`** — CPU core limit, mapped to `cputime:sigkill` rctl rule.
+- **`--memory SIZE`** — memory limit (e.g. `4g`, `512m`), mapped to
+  `memoryuse:sigkill` rctl rule.
+- **`--read-only`** — mount rootfs dataset read-only (`zfs set readonly=on`).
+  Applied after all filesystem mutations, before `jail -c`.
+- **`--tmpfs PATH[:SIZE]`** — mount tmpfs at PATH inside the jail.
+  Default 128m. Repeatable. Useful with `--read-only`.
+
+### Added — Interactive mode
+- **`-it`** — pseudo-TTY allocation for interactive use. Uses
+  `pty.openpty()` + `subprocess.Popen` (not `pty.fork()`, which fails in
+  asyncio thread pool). Forwards stdin ↔ PTY master in both directions.
+  Sets terminal to raw mode, restores on exit. Ctrl-C forwarded to jail.
+
+### Added — VNET per-jail network
+- **`--network vnet`** — per-jail virtual network stack with dedicated
+  `epair(4)` interface and private IP (10.101.0.0/30 per jail). Full network
+  isolation: each jail gets its own routing table, ARP cache, and TCP/IP
+  stack. Host-side epair configured with IP + optional pf NAT.
+- **`-p` / `--publish HOST_PORT:CTR_PORT[/PROTO]`** — port forwarding via
+  pf rdr rules. Redirects host ports to the jail's VNET IP. Requires
+  `--network vnet`. Protocol defaults to tcp.
+
+### Added — Image management
+- **`jailrun commit JAIL_NAME [IMAGE_REF]`** — create a new OCI image from
+  a jail's current rootfs state. ZFS snapshot + clone to images tree.
+  Committed images are runnable via `jailrun run <image_id>`.
+  `store.resolve()` checks local images before attempting registry pull.
+- **`jailrun cp SOURCE DEST`** — copy files between host and jail
+  (docker-cp semantics). `JAIL_NAME:path` prefixes a jail path. Uses tar
+  over jexec for efficient streaming. Handles rename when basenames differ.
+
+### Added — Monitoring
+- **`jailrun stats JAIL_NAME`** — live resource usage (memory, PIDs, CPU
+  time) via `rctl -u jail:<name>`. Docker-stats-like table format.
+- **`jailrun exec -d`** — run a command in background inside a running
+  jail. Output appended to the jail's log file.
+
+### Added — Testing & CI
+- **14 unit tests** for daemon mode (`runtime/test_daemon.py`): runner.py
+  job file loading/cleanup, `_cmd_stop`, `_cmd_rm`, `_cmd_wait`, name
+  uniqueness. All run on Linux without FreeBSD.
+- **CI (FreeBSD + jailrun)** workflow: syncs code to FreeBSD 15.1 VM via
+  tar+ssh, runs full test suite natively, then dogfoods by running commands
+  inside jailrun jails (python:3.9-slim + DNS verification).
+- **Zipapp CI**: `jailrun.pyz` built on every push, uploaded as workflow
+  artifact per Python version × commit.
+
+### Added — Distribution
+- **FreeBSD port** (`deploy/freebsd-port/`): Makefile with explicit
+  `GH_TAGNAME`, pkg-descr, pkg-message. Ready for `pkg install jailrun`.
+
+### Fixed
+- **DNS in jails**: `/etc/resolv.conf` copied (not bind-mounted) into jail
+  rootfs when `--network != "none"`. Without this, DNS failed for ALL images.
+- **Bakery/engine log noise**: three WARNING→DEBUG changes for normal
+  graceful-degradation paths (resolve_pkg fallback, shadow-skip, no-bakery-base).
+  `python:3.9-slim` now produces clean one-line output.
+- **Mount containment test**: unmount before temp dir cleanup (was "Device
+  busy" on FreeBSD where nullfs actually succeeds).
+- **`_destroy_dataset`**: retries with `-r` (recursive) for datasets with
+  child snapshots from `jailrun commit`.
+- **`resolv.conf` mount**: was using absolute path → doubled in rootfs;
+  fixed with `shutil.copy2`.
+- **`-it` flag**: was erroring with "not yet implemented" — now works.
+- **`jail_name`**: engine accepts `opts["jail_name"]` for custom names
+  (defaults to auto-generated `jailrun-<id>`).
+
+### Changed
+- `runtime/cli.py` docstring: lists all 15 subcommands.
+- `docs/USAGE.md`: fully rewritten — all subcommands documented with
+  examples, FreeBSD-requirement table expanded, daemon-mode section added.
+- `runtime/runner.py`: `except BaseException: raise` → `except Exception`
+  for graceful error handling; `try/finally` ensures job file cleanup.
+
 ## [1.0.0-alpha.1] - 2026-07-25
 
 ### Added — Production readiness (roadmap 1.0)
@@ -496,7 +593,8 @@ the pipeline for real; every one of these had sat unexercised through every prio
   framework for staging SIGKILL at each lifecycle phase and verifying
   `jailrun gc --fix` leaves zero orphans.
 
-[Unreleased]: https://github.com/bzdOS/jailrun/compare/v1.0.0-alpha.1...HEAD
+[Unreleased]: https://github.com/bzdOS/jailrun/compare/v1.0.0-alpha.2...HEAD
+[1.0.0-alpha.2]: https://github.com/bzdOS/jailrun/compare/v1.0.0-alpha.1...v1.0.0-alpha.2
 [1.0.0-alpha.1]: https://github.com/bzdOS/jailrun/compare/v0.9.0...v1.0.0-alpha.1
 [0.8.0]: https://github.com/bzdOS/jailrun/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/bzdOS/jailrun/compare/v0.6.0...v0.7.0

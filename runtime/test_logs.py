@@ -99,8 +99,8 @@ def _patched_rundb(rundb_class):
 
 
 def _args(jail: str) -> argparse.Namespace:
-    """Build the minimal argparse.Namespace _cmd_logs() reads (args.jail)."""
-    return argparse.Namespace(jail=jail)
+    """Build the minimal argparse.Namespace _cmd_logs() reads (args.jail, args.follow)."""
+    return argparse.Namespace(jail=jail, follow=False)
 
 
 def _run_cmd_logs(args: argparse.Namespace):

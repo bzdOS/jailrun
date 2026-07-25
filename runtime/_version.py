@@ -34,7 +34,7 @@ def _version_file() -> str | None:
 
 
 def jailrun_version() -> str:
-    v = _git_describe() or _version_file() or "1.0.0a1"
+    v = _git_describe() or _version_file() or "1.0.0a2"
     return v
 
 

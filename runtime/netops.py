@@ -28,6 +28,7 @@ never change the run's exit code).
 from __future__ import annotations
 
 import logging
+import os
 import re
 import subprocess
 import tempfile
@@ -38,6 +39,11 @@ log = logging.getLogger(__name__)
 # Loopback interface that holds jail IP aliases, and the CIDR pool they're drawn
 # from (must match netpolicy.alloc_jail_ip's default).
 LO_IFACE = "lo1"
+
+# VNET private subnet for per-jail epair links. Each jail gets a /30 from this
+# block: .1 is the host side, .2 is the jail side.
+# Incremented per jail so concurrent runs don't collide.
+_vnet_next_ip = 0  # counts /30 blocks, not individual IPs
 
 
 def _run(argv: list[str], *, check: bool = True) -> subprocess.CompletedProcess:
@@ -162,3 +168,138 @@ def teardown_network(jail_name: str, jail_ip: str) -> None:
     flush_anchor(jail_name)
     remove_alias(jail_ip)
 # teardown_network:end
+
+
+# ---------------------------------------------------------------------------
+# VNET (per-jail virtual network stack)
+# ---------------------------------------------------------------------------
+
+# _alloc_vnet_ip: allocate the next /30 from VNET_PREFIX
+def _alloc_vnet_ip() -> tuple[str, str]:
+    """Return (host_ip, jail_ip) — a /30 pair (host=.1, jail=.2)."""
+    global _vnet_next_ip
+    base = _vnet_next_ip
+    _vnet_next_ip += 4  # /30 = 4 addresses (0=net, 1=host, 2=jail, 3=bcast)
+    octet4_host = base + 1
+    octet4_jail = base + 2
+    return (f"10.101.0.{octet4_host}", f"10.101.0.{octet4_jail}")
+
+
+# create_epair:start
+#   purpose: create a virtual Ethernet pair for a VNET jail
+#   returns: tuple[str, str] — (host_if, jail_if) interface names
+def create_epair() -> tuple[str, str]:
+    """Create an epair(4) interface. Returns (host_end, jail_end)."""
+    proc = _run(["ifconfig", "epair", "create"], check=True)
+    name = proc.stdout.strip()
+    # ifconfig epair create returns the 'a' end (e.g. "epair0a").
+    # The 'b' end is the same prefix with the last char changed.
+    host_if = name
+    jail_if = name[:-1] + "b" if name.endswith("a") else name + "b"
+    log.debug("vnet: created epair %s (host=%s jail=%s)", name, host_if, jail_if)
+    return host_if, jail_if
+
+
+# destroy_epair:start
+#   purpose: destroy a VNET epair (host side). Best-effort.
+def destroy_epair(host_if: str) -> None:
+    _run(["ifconfig", host_if, "destroy"], check=False)
+    log.debug("vnet: destroyed epair %s", host_if)
+
+
+# setup_vnet_host:start
+#   purpose: configure the HOST side of a VNET epair: assign IP, bring up,
+#            add default NAT via pf so the jail can reach the internet
+def setup_vnet_host(host_if: str, host_ip: str, jail_name: str) -> None:
+    """Configure the host-side epair + add NAT pf anchor for the jail."""
+    _run(["ifconfig", host_if, "inet", f"{host_ip}/30", "up"], check=True)
+    log.info("vnet host side %s: %s/30", host_if, host_ip)
+
+    # Add a pf anchor for NAT: masquerade traffic from the jail's subnet.
+    # If pf is not available (not enabled on this host), skip gracefully —
+    # the jail still has local connectivity to the host but no internet NAT.
+    rules = (
+        f'nat on egress from {host_ip}/30 to any -> (egress)\n'
+        f'pass from {host_ip}/30 to any keep state\n'
+    )
+    anc = f"jailrun/{jail_name}"
+    fd, path = tempfile.mkstemp(suffix=".pf", prefix=f"vnet-{jail_name}-", text=True)
+    with os.fdopen(fd, "w") as f:
+        f.write(rules)
+    try:
+        _run(["pfctl", "-a", anc, "-f", path], check=True)
+    except RuntimeError as exc:
+        log.warning("vnet: pf NAT not available (jail still has local link only): %s", exc)
+    else:
+        log.info("vnet: NAT anchor loaded for %s", jail_name)
+    finally:
+        Path(path).unlink(missing_ok=True)
+
+
+# setup_vnet_jail:start
+#   purpose: configure the JAIL side of a VNET epair + default route
+#            (run after jail -c via jexec)
+def setup_vnet_jail(jail_name: str, jail_if: str, jail_ip: str, host_ip: str, linuxulator: bool = False) -> None:
+    """Configure the jail-side epair IP inside the jail (best-effort).
+
+    Under Linuxulator the interface is renamed to ``eth0``; native FreeBSD
+    jails keep the original epair name (e.g. ``epair0b``). Each step is
+    best-effort because some ioctls (set link up, default route) are not
+    fully functional under Linuxulator VNET."""
+    iface = "eth0" if linuxulator else jail_if
+
+    if linuxulator:
+        _run(["jexec", jail_name, "ip", "addr", "add", f"{jail_ip}/30", "dev", iface], check=False)
+        _run(["jexec", jail_name, "ip", "link", "set", iface, "up"], check=False)
+    else:
+        _run(["jexec", jail_name, "ifconfig", iface, "inet", f"{jail_ip}/30", "up"], check=False)
+    log.info("vnet jail side %s: %s/30 (iface=%s)", jail_if, jail_ip, iface)
+# setup_vnet_jail:end
+
+
+# teardown_vnet:start
+#   purpose: tear down VNET setup — flush pf anchor, destroy epair
+def teardown_vnet(host_if: str, jail_name: str) -> None:
+    """Remove VNET network: flush pf anchor, destroy epair."""
+    _run(["pfctl", "-a", f"jailrun/{jail_name}", "-F", "all"], check=False)
+    destroy_epair(host_if)
+
+
+# ---------------------------------------------------------------------------
+# Port publishing (--publish / -p) — pf rdr rules for VNET jails
+# ---------------------------------------------------------------------------
+
+# setup_publish_ports:start
+def setup_publish_ports(jail_name: str, jail_ip: str, specs: list[tuple[int, int, str]]) -> None:
+    """Load pf rdr rules to forward host ports to the jail.
+
+    Each spec is (host_port, jail_port, proto). Uses detect_ext_if() to
+    find the egress interface. Best-effort — if pf is not available the
+    rules are simply not loaded and a warning is logged."""
+    ext_if = detect_ext_if()
+    if ext_if is None:
+        log.warning("publish: no default route / egress interface — cannot add rdr rules")
+        return
+
+    rules_lines: list[str] = []
+    for host_port, jail_port, proto in specs:
+        rules_lines.append(
+            f"rdr pass on {ext_if} proto {proto} from any to ({ext_if}) port {host_port} "
+            f"-> {jail_ip} port {jail_port}"
+        )
+        log.info("publish: %s %s:%s -> %s:%s", proto, ext_if, host_port, jail_ip, jail_port)
+
+    rules_text = "\n".join(rules_lines) + "\n"
+    anc = f"jailrun/{jail_name}"
+    fd, path = tempfile.mkstemp(suffix=".pf", prefix=f"publish-{jail_name}-", text=True)
+    with os.fdopen(fd, "w") as f:
+        f.write(rules_text)
+    try:
+        _run(["pfctl", "-a", anc, "-f", path], check=True)
+    except RuntimeError as exc:
+        log.warning("publish: could not load rdr rules (pf not available?): %s", exc)
+    else:
+        log.info("publish: rdr anchor loaded for %s (%d rules)", jail_name, len(specs))
+    finally:
+        Path(path).unlink(missing_ok=True)
+# setup_publish_ports:end

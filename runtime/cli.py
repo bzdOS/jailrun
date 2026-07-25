@@ -21,6 +21,10 @@ Entry point: `jailrun` dispatches to subcommands:
   jailrun pull IMAGE [--authfile PATH] [--creds USER:PASS]
   jailrun ps [--all]
   jailrun logs JAIL_NAME
+  jailrun stop [--rm] JAIL_NAME
+  jailrun rm JAIL_NAME
+  jailrun wait JAIL_NAME
+  jailrun inspect JAIL_NAME [--format text|json]
   jailrun explain [--manifest FILE | IMAGE] [--format text|json]
   jailrun scan IMAGE [IMAGE...] [--format text|json]
   jailrun doctor [--format text|json]
@@ -39,7 +43,12 @@ Design notes:
 from __future__ import annotations
 
 import argparse
+import json
+import os
+import subprocess
 import sys
+import tempfile
+import uuid
 
 
 # ---------------------------------------------------------------------------
@@ -114,6 +123,38 @@ def _creds_pair(s: str) -> tuple[str, str]:
             f"--creds user must not be empty, got: {s!r}"
         )
     return (user, password)
+
+
+# _publish_spec: parses "HOST_PORT:CTR_PORT[/PROTO]" into (host_port, ctr_port, proto) — pure, no IO
+def _publish_spec(s: str) -> tuple[int, int, str]:
+    """
+    Parse HOST_PORT:CTR_PORT[/PROTO] into (host_port, ctr_port, proto).
+    Raises ArgumentTypeError on bad input.
+    """
+    proto = "tcp"
+    rest = s
+    if "/" in s:
+        rest, _, proto = s.rpartition("/")
+        if proto not in ("tcp", "udp"):
+            raise argparse.ArgumentTypeError(
+                f"protocol must be 'tcp' or 'udp', got: {proto!r}"
+            )
+    if ":" not in rest:
+        raise argparse.ArgumentTypeError(
+            f"-p / --publish expects HOST_PORT:CTR_PORT[/PROTO], got: {s!r}"
+        )
+    host_part, _, ctr_part = rest.partition(":")
+    if not host_part.isdigit() or not ctr_part.isdigit():
+        raise argparse.ArgumentTypeError(
+            f"-p / --publish ports must be numbers, got: {s!r}"
+        )
+    host_port = int(host_part)
+    ctr_port = int(ctr_part)
+    if not (1 <= host_port <= 65535) or not (1 <= ctr_port <= 65535):
+        raise argparse.ArgumentTypeError(
+            f"-p / --publish ports must be 1..65535, got: {s!r}"
+        )
+    return (host_port, ctr_port, proto)
 
 
 # ---------------------------------------------------------------------------
@@ -249,6 +290,28 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     run_p.add_argument(
+        "--cpus",
+        dest="cpus",
+        type=float,
+        default=None,
+        metavar="N",
+        help=(
+            "CPU core limit (e.g. --cpus=2). Maps to cputime:sigkill "
+            "rctl rule (N × 3600 CPU-seconds). Default: no per-run override."
+        ),
+    )
+    run_p.add_argument(
+        "--memory",
+        dest="memory",
+        type=str,
+        default=None,
+        metavar="SIZE",
+        help=(
+            "Memory limit (e.g. --memory=4g, --memory=512m). Maps to "
+            "memoryuse:sigkill rctl rule. Default: 8g (jailrun's built-in default)."
+        ),
+    )
+    run_p.add_argument(
         "-it",
         action="store_true",
         dest="interactive",
@@ -256,6 +319,59 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Allocate a pseudo-TTY and keep stdin open "
             "(mirrors docker -it; stub — interactive PTY not yet implemented)."
+        ),
+    )
+    run_p.add_argument(
+        "--name",
+        dest="name",
+        metavar="NAME",
+        default=None,
+        help="Assign a name to the jail (must be unique on this host).",
+    )
+    run_p.add_argument(
+        "-d", "--detach",
+        action="store_true",
+        dest="detach",
+        default=False,
+        help=(
+            "Run the jail in background (detached). "
+            "Prints the jail/container name and returns immediately. "
+            "Use `jailrun stop NAME` to stop it."
+        ),
+    )
+    run_p.add_argument(
+        "--read-only",
+        action="store_true",
+        dest="read_only",
+        default=False,
+        help=(
+            "Mount the rootfs dataset read-only (ZFS readonly=on). "
+            "Combine with --tmpfs for writable temp directories."
+        ),
+    )
+    run_p.add_argument(
+        "--tmpfs",
+        dest="tmpfs",
+        metavar="PATH[:SIZE]",
+        action="append",
+        default=None,
+        help=(
+            "Mount a tmpfs at PATH inside the jail. "
+            "Optionally append ':SIZE' (e.g. --tmpfs /tmp:512m). "
+            "Repeatable. Useful with --read-only."
+        ),
+    )
+    run_p.add_argument(
+        "-p", "--publish",
+        dest="publish",
+        metavar="HOST_PORT:CTR_PORT[/PROTO]",
+        action="append",
+        type=_publish_spec,
+        default=None,
+        help=(
+            "Publish a host port to the jail (port forwarding). "
+            "Protocol defaults to tcp. Requires --network vnet. "
+            "Repeatable, e.g. -p 8080:80 -p 53:53/udp."
         ),
     )
     # IMAGE is positional; everything after it is the command.
@@ -320,6 +436,13 @@ def _build_parser() -> argparse.ArgumentParser:
             "Kill this exec'd command after this many seconds (default: "
             "engine.DEFAULT_JEXEC_TIMEOUT_S, 1800s)."
         ),
+    )
+    exec_p.add_argument(
+        "-d", "--detach",
+        action="store_true",
+        dest="detach",
+        default=False,
+        help="Run the command in background (detached). Output goes to the jail's log file.",
     )
     # JAIL_NAME is positional; everything after it is the command (mirrors
     # `run`'s IMAGE + cmd REMAINDER pattern above).
@@ -402,6 +525,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "jail",
         metavar="JAIL_NAME",
         help="jail name (e.g. jailrun-<handle>), as shown by `jailrun ps`.",
+    )
+    logs_p.add_argument(
+        "-f", "--follow",
+        action="store_true",
+        dest="follow",
+        default=False,
+        help="Follow log output in real time (like `tail -f`).",
     )
 
     # ---- explain --------------------------------------------------------
@@ -567,6 +697,161 @@ def _build_parser() -> argparse.ArgumentParser:
         )
         lp.add_argument("jail", help="jail name (e.g. jailrun-<handle>)")
 
+    # ---- stop ----------------------------------------------------------------
+    stop_p = sub.add_parser(
+        "stop",
+        help="Stop a running jail (kill processes, remove jail, record exit)",
+        description=(
+            "Stop a running jail managed by jailrun: SIGKILL all processes\n"
+            "inside the jail (via jexec kill -KILL -1), remove the persist\n"
+            "jail (jail -r), and update the run-state db to status='killed'.\n"
+            "\n"
+            "Does NOT destroy the clone/rootfs dataset by default — pass\n"
+            "--rm to also reclaim that storage (or run `jailrun gc --fix`\n"
+            "later to clean up orphaned datasets)."
+        ),
+    )
+    stop_p.add_argument(
+        "jail",
+        metavar="JAIL_NAME",
+        help="Name of a running jail (e.g. jailrun-<id> or the --name used at creation).",
+    )
+    stop_p.add_argument(
+        "--rm",
+        action="store_true",
+        dest="rm",
+        default=False,
+        help=(
+            "Also destroy the clone/rootfs dataset after stopping "
+            "(like `jailrun run --rm` does on normal exit)."
+        ),
+    )
+
+    # ---- rm ------------------------------------------------------------------
+    rm_p = sub.add_parser(
+        "rm",
+        help="Remove a stopped jail's clone/rootfs dataset",
+        description=(
+            "Destroy the ZFS clone or plaindir copy backing a stopped jail.\n"
+            "The jail must NOT be running (stop it first with `jailrun stop`).\n"
+            "Does not modify the run-state db entry itself."
+        ),
+    )
+    rm_p.add_argument(
+        "jail",
+        metavar="JAIL_NAME",
+        help="Name of a stopped jail (e.g. jailrun-<id> or the --name used at creation).",
+    )
+
+    # ---- wait ----------------------------------------------------------------
+    wait_p = sub.add_parser(
+        "wait",
+        help="Follow a running jail's log output (tail -f, like docker attach)",
+        description=(
+            "Tail the log file of a running (or recently completed) jail.\n"
+            "Follows the file in real-time until the jail stops or the\n"
+            "user presses Ctrl-C."
+        ),
+    )
+    wait_p.add_argument(
+        "jail",
+        metavar="JAIL_NAME",
+        help="Name of a running (or recently-completed) jail.",
+    )
+
+    # ---- inspect --------------------------------------------------------------
+    inspect_p = sub.add_parser(
+        "inspect",
+        help="Show detailed information about a jail (JSON)",
+        description=(
+            "Print a JSON object with the jail's run-state, live status,\n"
+            "and store backend information — the same shape as `docker inspect`.\n"
+            "Combines data from the run-state db (rundb) and `jls -n`."
+        ),
+    )
+    inspect_p.add_argument(
+        "jail",
+        metavar="JAIL_NAME",
+        help="Jail name (e.g. jailrun-<id> or the --name used at creation).",
+    )
+    inspect_p.add_argument(
+        "--format",
+        dest="format",
+        choices=("text", "json"),
+        default="json",
+        help="Output format (default: json).",
+    )
+
+    # ---- commit ---------------------------------------------------------------
+    commit_p = sub.add_parser(
+        "commit",
+        help="Create a new image from a jail's current state (like docker commit)",
+        description=(
+            "Create a new OCI image from a jail's current rootfs state.\n"
+            "Snapshots the run's ZFS clone and registers it as a new image\n"
+            "in the store, making it available for future `jailrun run` commands.\n"
+            "\n"
+            "Example:\n"
+            "  jailrun run -d --name build alpine:3.19 ./compile.sh\n"
+            "  jailrun commit build myapp:built\n"
+            "  jailrun run --rm myapp:built ./test.sh"
+        ),
+    )
+    commit_p.add_argument(
+        "jail",
+        metavar="JAIL_NAME",
+        help="Name of a jail (running or stopped) to commit.",
+    )
+    commit_p.add_argument(
+        "image_ref",
+        metavar="IMAGE_REF",
+        nargs="?",
+        default=None,
+        help="Optional image reference tag (e.g. myapp:built). Auto-generated if omitted.",
+    )
+
+    # ---- stats ---------------------------------------------------------------
+    stats_p = sub.add_parser(
+        "stats",
+        help="Show resource usage for a running jail",
+        description=(
+            "Display live resource usage (memory, CPU, processes) for a\n"
+            "running jail, read from rctl(8) — the same data Docker stats shows.\n"
+            "\n"
+            "The jail must be running. Reads rctl current values for\n"
+            "memoryuse, maxproc, and cputime."
+        ),
+    )
+    stats_p.add_argument(
+        "jail",
+        metavar="JAIL_NAME",
+        help="Name of a running jail.",
+    )
+
+    # ---- cp ------------------------------------------------------------------
+    cp_p = sub.add_parser(
+        "cp",
+        help="Copy files between host and jail (like docker cp)",
+        description=(
+            "Copy files or directories between the host filesystem and\n"
+            "a jail. JAIL_NAME:PATH prefixes a path inside the jail.\n"
+            "\n"
+            "Examples:\n"
+            "  jailrun cp mybuild:/artifact.bin ./\n"
+            "  jailrun cp ./config.yaml mybuild:/etc/config.yaml"
+        ),
+    )
+    cp_p.add_argument(
+        "source",
+        metavar="SOURCE",
+        help="Source path (host:/path or JAIL_NAME:path).",
+    )
+    cp_p.add_argument(
+        "dest",
+        metavar="DEST",
+        help="Destination path (host:/path or JAIL_NAME:path).",
+    )
+
     return parser
 
 
@@ -583,18 +868,28 @@ def _build_parser() -> argparse.ArgumentParser:
 #   sideEffects: calls runtime.engine.run() which pulls OCI image via skopeo, clones ZFS dataset,
 #                spawns jail(8) process, mounts nullfs volumes, sets jail env
 # _cmd_run:end
+def _rctl_rules_from_args(args: argparse.Namespace) -> list[str] | None:
+    """Build the rctl_rules list from --rctl-rule, --cpus, --memory.
+
+    Returns None when no rules are specified at all (engine uses defaults).
+    Returns a list (possibly empty) of rule strings when any override is given,
+    which replaces the engine defaults entirely.
+    """
+    rules: list[str] = list(args.rctl_rules) if args.rctl_rules else []
+    if args.cpus is not None:
+        cpu_seconds = int(args.cpus * 3600)
+        rules.append(f"cputime:sigkill={cpu_seconds}")
+    if args.memory is not None:
+        rules.append(f"memoryuse:sigkill={args.memory}")
+    return rules if rules else None
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     """Dispatch to engine.run(); return exit code."""
     from runtime.engine import run  # noqa: PLC0415  (import inside fn for testability)
 
-    if args.interactive:
-        print(
-            "error: -it (interactive PTY) is not yet implemented.\n"
-            "Use jailrun run (non-interactive) — the command's stdout/stderr\n"
-            "streams to your terminal, but stdin is not connected.",
-            file=sys.stderr,
-        )
-        return 1
+    if args.detach:
+        return _cmd_run_detached(args)
 
     opts: dict = {
         "rm": args.rm,
@@ -605,8 +900,11 @@ def _cmd_run(args: argparse.Namespace) -> int:
         "network": args.network,
         "allow_raw_sockets": args.allow_raw_sockets,
         "rctl_enabled": args.rctl_enabled,
-        "rctl_rules": args.rctl_rules,
+        "rctl_rules": _rctl_rules_from_args(args),
         "allow_unrestricted_devfs": args.allow_unrestricted_devfs,
+        "read_only": args.read_only,
+        "tmpfs": args.tmpfs,
+        "publish": args.publish,
     }
     if args.timeout is not None:
         # Only set when given — engine.py's opts.get("timeout", DEFAULT_JEXEC_TIMEOUT_S)
@@ -614,6 +912,67 @@ def _cmd_run(args: argparse.Namespace) -> int:
         # (no limit at all) instead of falling back to the documented default.
         opts["timeout"] = args.timeout
     return run(image_ref=args.image, cmd=args.cmd, opts=opts)
+
+
+def _cmd_run_detached(args: argparse.Namespace) -> int:
+    """Run a jail in the background via runtime.runner. Print the name and exit."""
+    jail_name: str = args.name or f"jailrun-{uuid.uuid4().hex[:16]}"
+
+    # Reject duplicate names before writing anything.
+    if args.name:
+        from runtime.engine import _check_jail_live  # noqa: PLC0415
+        live, _ = _check_jail_live(jail_name)
+        if live:
+            print(f"jailrun: name {jail_name!r} is already in use by a running jail", file=sys.stderr)
+            return 1
+        try:
+            from runtime.rundb import RunDB  # noqa: PLC0415
+            for r in RunDB().list_runs(status="running"):
+                if r.get("jail_name") == jail_name:
+                    print(
+                        f"jailrun: name {jail_name!r} is already in the run-state db "
+                        f"as 'running' — run `jailrun gc --fix` first",
+                        file=sys.stderr,
+                    )
+                    return 1
+        except Exception:  # noqa: BLE001
+            pass
+
+    opts: dict = {
+        "rm": args.rm,
+        "volumes": args.volumes,
+        "env": dict(args.env),
+        "workdir": args.workdir,
+        "interactive": args.interactive,
+        "network": args.network,
+        "allow_raw_sockets": args.allow_raw_sockets,
+        "rctl_enabled": args.rctl_enabled,
+        "rctl_rules": _rctl_rules_from_args(args),
+        "allow_unrestricted_devfs": args.allow_unrestricted_devfs,
+        "jail_name": jail_name,
+        "read_only": args.read_only,
+        "tmpfs": args.tmpfs,
+        "publish": args.publish,
+    }
+    if args.timeout is not None:
+        opts["timeout"] = args.timeout
+
+    job: dict = {"image_ref": args.image, "cmd": args.cmd, "opts": opts}
+
+    fd, job_path = tempfile.mkstemp(suffix=".json", prefix=f"jailrun-{jail_name}-")
+    with os.fdopen(fd, "w") as fh:
+        json.dump(job, fh)
+
+    subprocess.Popen(
+        [sys.executable, "-m", "runtime.runner", job_path],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+    )
+
+    print(jail_name)
+    return 0
 
 
 # _cmd_exec:start
@@ -647,6 +1006,9 @@ def _cmd_exec(args: argparse.Namespace) -> int:
         print(message, file=sys.stderr)
         return 1
 
+    if args.detach:
+        return _cmd_exec_detached(args)
+
     opts: dict = {
         "env": dict(args.env),
         "workdir": args.workdir,
@@ -659,6 +1021,51 @@ def _cmd_exec(args: argparse.Namespace) -> int:
     except Exception as exc:  # noqa: BLE001 — CLI reports a clean message, never a raw traceback
         print(f"jailrun exec: failed: {exc}", file=sys.stderr)
         return 1
+
+
+def _cmd_exec_detached(args: argparse.Namespace) -> int:
+    """Run CMD inside an already-running jail in the background (detached)."""
+    import subprocess  # noqa: PLC0415
+    from runtime.engine import _check_jail_live  # noqa: PLC0415
+    from runtime.rundb import RunDB  # noqa: PLC0415
+
+    live, message = _check_jail_live(args.jail)
+    if not live:
+        print(message, file=sys.stderr)
+        return 1
+
+    # Build jexec argv — mirrors engine._stream_jexec's logic
+    env_prefix: list[str] = ["env"]
+    for k, v in dict(args.env).items():
+        env_prefix.append(f"{k}={v}")
+
+    jexec_argv: list[str] = ["jexec", args.jail]
+    if args.workdir:
+        import shlex  # noqa: PLC0415
+        inner = shlex.join(env_prefix + args.cmd)
+        jexec_argv += ["sh", "-c", f"cd {shlex.quote(args.workdir)} && {inner}"]
+    else:
+        jexec_argv += env_prefix + args.cmd
+
+    # Append output to the jail's log file (best-effort)
+    log_file = None
+    try:
+        log_path = RunDB().get_log_path(args.jail)
+        if log_path:
+            log_file = open(log_path, "ab")  # noqa: SIM115 — closed by the child process
+    except Exception:  # noqa: BLE001
+        pass
+
+    proc = subprocess.Popen(
+        jexec_argv,
+        stdin=subprocess.DEVNULL,
+        stdout=log_file or subprocess.DEVNULL,
+        stderr=subprocess.STDOUT if log_file else subprocess.DEVNULL,
+        close_fds=True,
+    )
+
+    print(f"jailrun exec: detached PID {proc.pid}")
+    return 0
 
 
 # _cmd_pull:start
@@ -932,6 +1339,345 @@ def _cmd_logs(args: argparse.Namespace) -> int:
         return 1
 
     print(content, end="")
+    if args.follow:
+        sys.stdout.flush()
+        return _cmd_wait(args)
+    return 0
+
+
+def _cmd_stop(args: argparse.Namespace) -> int:
+    """Stop a running jail: SIGKILL, jail -r, record exit. Optionally destroy clone."""
+    from runtime.engine import _check_jail_live  # noqa: PLC0415
+    from runtime.lifecycle import Lifecycled  # noqa: PLC0415
+    from runtime.rundb import RunDB  # noqa: PLC0415
+
+    live, message = _check_jail_live(args.jail)
+    if not live:
+        print(message, file=sys.stderr)
+        return 1
+
+    Lifecycled().kill(args.jail)
+
+    try:
+        subprocess.run(
+            ["jail", "-r", args.jail],
+            capture_output=True, timeout=30, check=False,
+        )
+    except OSError as exc:
+        print(f"jailrun stop: jail -r failed: {exc}", file=sys.stderr)
+        return 1
+
+    RunDB().record_exit(args.jail, "killed", None)
+
+    if args.rm:
+        try:
+            from runtime.gc import _destroy_dataset  # noqa: PLC0415
+            rows = RunDB().list_runs(status=None)
+            dataset: str | None = None
+            for r in rows:
+                if r.get("jail_name") == args.jail:
+                    dataset = r.get("dataset")
+                    break
+            if dataset:
+                ok, detail = _destroy_dataset(dataset)
+                if not ok:
+                    print(f"jailrun stop: dataset destroy failed: {detail}", file=sys.stderr)
+        except Exception as exc:  # noqa: BLE001
+            print(f"jailrun stop: dataset cleanup failed: {exc}", file=sys.stderr)
+
+    print(f"jailrun: stopped {args.jail}")
+    return 0
+
+
+def _cmd_rm(args: argparse.Namespace) -> int:
+    """Destroy a stopped jail's clone/rootfs dataset. Jail must not be running."""
+    from runtime.engine import _check_jail_live  # noqa: PLC0415
+    from runtime.gc import _destroy_dataset  # noqa: PLC0415
+    from runtime.rundb import RunDB  # noqa: PLC0415
+
+    live, message = _check_jail_live(args.jail)
+    if live:
+        print(
+            f"jailrun rm: {args.jail!r} is still running — stop it first "
+            f"(`jailrun stop {args.jail}`)",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        rows = RunDB().list_runs(status=None)
+    except Exception as exc:  # noqa: BLE001
+        print(f"jailrun rm: could not read run-state db: {exc}", file=sys.stderr)
+        return 1
+
+    dataset: str | None = None
+    for r in rows:
+        if r.get("jail_name") == args.jail:
+            dataset = r.get("dataset")
+            break
+
+    if not dataset:
+        print(f"jailrun rm: no dataset found for {args.jail!r}", file=sys.stderr)
+        return 1
+
+    ok, detail = _destroy_dataset(dataset)
+    if not ok:
+        print(
+            f"jailrun rm: could not destroy dataset {dataset!r}: {detail}\n"
+            f"Try `jailrun gc --fix` for a more thorough cleanup.",
+            file=sys.stderr,
+        )
+        return 1
+
+    print(f"jailrun: removed {args.jail} ({dataset})")
+    return 0
+
+
+def _cmd_wait(args: argparse.Namespace) -> int:
+    """Tail -f of a jail's log file. Follows until the jail stops or Ctrl-C."""
+    import time  # noqa: PLC0415
+    from runtime.engine import _check_jail_live  # noqa: PLC0415
+    from runtime.rundb import RunDB  # noqa: PLC0415
+
+    log_path = RunDB().get_log_path(args.jail)
+    if not log_path:
+        print(f"jailrun wait: no log file found for {args.jail!r}", file=sys.stderr)
+        return 1
+
+    try:
+        with open(log_path, "r") as fh:
+            while True:
+                line = fh.readline()
+                if line:
+                    print(line, end="", flush=True)
+                else:
+                    time.sleep(0.2)
+                    live, _ = _check_jail_live(args.jail)
+                    if not live:
+                        remaining = fh.read()
+                        if remaining:
+                            print(remaining, end="", flush=True)
+                        break
+    except KeyboardInterrupt:
+        pass
+
+    return 0
+
+
+def _cmd_commit(args: argparse.Namespace) -> int:
+    """Create a new image from a jail's current state (docker commit)."""
+    import sqlite3  # noqa: PLC0415
+    from runtime.rundb import RunDB  # noqa: PLC0415
+
+    # Look up the jail's dataset from rundb
+    try:
+        rows = RunDB().list_runs(status=None)
+    except (OSError, sqlite3.Error) as exc:
+        print(f"jailrun commit: could not read run-state db: {exc}", file=sys.stderr)
+        return 1
+
+    dataset: str | None = None
+    for r in rows:
+        if r.get("jail_name") == args.jail:
+            dataset = r.get("dataset")
+            break
+
+    if not dataset:
+        print(f"jailrun commit: no dataset found for {args.jail!r}", file=sys.stderr)
+        return 1
+
+    try:
+        from store.store import Store  # noqa: PLC0415
+        store = Store()
+        image_id = store.commit_image(dataset, image_ref=args.image_ref)
+    except NotImplementedError as exc:
+        print(f"jailrun commit: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001
+        print(f"jailrun commit: failed: {exc}", file=sys.stderr)
+        return 1
+
+    if args.image_ref:
+        print(f"{args.image_ref} ({image_id})")
+    else:
+        print(image_id)
+    return 0
+
+
+def _cmd_stats(args: argparse.Namespace) -> int:
+    """Show resource usage for a running jail via rctl."""
+    import subprocess  # noqa: PLC0415
+    from runtime.engine import _check_jail_live  # noqa: PLC0415
+
+    live, message = _check_jail_live(args.jail)
+    if not live:
+        print(message, file=sys.stderr)
+        return 1
+
+    try:
+        proc = subprocess.run(
+            ["rctl", "-u", f"jail:{args.jail}"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"jailrun stats: rctl failed: {exc}", file=sys.stderr)
+        return 1
+
+    # Parse rctl -u output: lines like "memoryuse=970752"
+    stats: dict[str, str] = {}
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if "=" in line:
+            key, _, val = line.partition("=")
+            stats[key] = val
+
+    mem_bytes = int(stats.get("memoryuse", "0"))
+    mem_mib = mem_bytes / (1024 * 1024)
+    pids = stats.get("maxproc", "0")
+    cpu_sec = int(stats.get("cputime", "0"))
+
+    print(f"JAIL       MEMORY    PIDS  CPUTIME(s)")
+    print(f"{args.jail:<10} {mem_mib:>6.0f}MiB {pids:>5} {cpu_sec:>10}")
+    return 0
+
+
+def _cmd_cp(args: argparse.Namespace) -> int:
+    """Copy files between host and jail (docker cp semantics)."""
+    import subprocess  # noqa: PLC0415
+    import shlex  # noqa: PLC0415
+
+    def _parse_spec(spec: str) -> tuple[str | None, str]:
+        """Parse 'JAIL_NAME:path' or '/absolute/path'. Returns (jail_name, path)."""
+        if ":" in spec:
+            jail, _, path = spec.partition(":")
+            if jail and path:
+                return jail, path
+        return None, spec
+
+    src_jail, src_path = _parse_spec(args.source)
+    dst_jail, dst_path = _parse_spec(args.dest)
+
+    # Validate: exactly one side must be a jail (the other is the host)
+    if src_jail and dst_jail:
+        print("jailrun cp: cannot copy between two jails", file=sys.stderr)
+        return 1
+    if not src_jail and not dst_jail:
+        print("jailrun cp: one path must include JAIL_NAME:", file=sys.stderr)
+        return 1
+
+    # Copy FROM jail TO host
+    if src_jail:
+        from runtime.engine import _check_jail_live  # noqa: PLC0415
+        live, message = _check_jail_live(src_jail)
+        if not live:
+            print(message, file=sys.stderr)
+            return 1
+        try:
+            import os as _os  # noqa: PLC0415
+            dst_parent = _os.path.dirname(dst_path) or "."
+            if dst_parent != ".":
+                _os.makedirs(dst_parent, exist_ok=True)
+            rel_src = src_path.lstrip("/")
+            src_base = _os.path.basename(rel_src)
+            dst_base = _os.path.basename(dst_path)
+            jexec_proc = subprocess.Popen(
+                ["jexec", src_jail, "tar", "-C", "/", "-cf", "-", rel_src],
+                stdout=subprocess.PIPE,
+            )
+            subprocess.run(
+                ["tar", "xf", "-", "--strip-components", "1", "-C", dst_parent],
+                stdin=jexec_proc.stdout, check=True, timeout=60,
+            )
+            jexec_proc.wait()
+            # If destination filename differs from source (after stripping
+            # one path component), rename.
+            src_base = _os.path.basename(rel_src)
+            dst_base = _os.path.basename(dst_path)
+            if src_base != dst_base:
+                extracted = _os.path.join(dst_parent, src_base)
+                if _os.path.exists(extracted):
+                    _os.rename(extracted, dst_path)
+        except Exception as exc:  # noqa: BLE001
+            print(f"jailrun cp: failed to copy from jail: {exc}", file=sys.stderr)
+            return 1
+
+    # Copy FROM host TO jail
+    if dst_jail:
+        import shlex  # noqa: PLC0415
+        from runtime.engine import _check_jail_live  # noqa: PLC0415
+        live, message = _check_jail_live(dst_jail)
+        if not live:
+            print(message, file=sys.stderr)
+            return 1
+        try:
+            import os as _os  # noqa: PLC0415
+            src_dir = _os.path.dirname(src_path) or "."
+            src_base = _os.path.basename(src_path)
+            dst_parent = _os.path.dirname(dst_path) or "."
+            if dst_parent != ".":
+                subprocess.run(
+                    ["jexec", dst_jail, "mkdir", "-p", dst_parent],
+                    capture_output=True, timeout=10, check=False,
+                )
+            # Pipe tar of the source into the jail, extract, then rename
+            # if the destination basename differs (mv is needed because
+            # BusyBox tar inside Alpine doesn't support -s / --transform).
+            tar_proc = subprocess.Popen(
+                ["tar", "-C", src_dir, "-cf", "-", src_base],
+                stdout=subprocess.PIPE,
+            )
+            subprocess.run(
+                ["jexec", dst_jail, "tar", "xf", "-", "-C", dst_parent],
+                stdin=tar_proc.stdout, check=True, timeout=60,
+            )
+            tar_proc.wait()
+            dst_base = _os.path.basename(dst_path)
+            if src_base != dst_base:
+                extracted = _os.path.join(dst_parent, src_base)
+                subprocess.run(
+                    ["jexec", dst_jail, "mv", extracted, dst_path],
+                    capture_output=True, timeout=10, check=False,
+                )
+        except Exception as exc:  # noqa: BLE001
+            print(f"jailrun cp: failed to copy to jail: {exc}", file=sys.stderr)
+            return 1
+
+    return 0
+
+
+def _cmd_inspect(args: argparse.Namespace) -> int:
+    """Print detailed JSON info about a jail (rundb + jls)."""
+    import json  # noqa: PLC0415
+    from runtime.engine import _check_jail_live, _list_live_jail_names  # noqa: PLC0415
+    from runtime.rundb import RunDB  # noqa: PLC0415
+
+    info: dict = {"jail_name": args.jail}
+
+    # Live status from jls
+    jail_names = _list_live_jail_names()
+    info["live"] = jail_names is not None and args.jail in jail_names
+
+    # Run-state from rundb
+    try:
+        rows = RunDB().list_runs(status=None)
+        for r in rows:
+            if r.get("jail_name") == args.jail:
+                info["rundb"] = {
+                    "image": r.get("image"),
+                    "image_digest": r.get("image_digest"),
+                    "dataset": r.get("dataset"),
+                    "status": r.get("status"),
+                    "exit_code": r.get("exit_code"),
+                    "started_at": r.get("started_at"),
+                    "ended_at": r.get("ended_at"),
+                    "log_path": r.get("log_path"),
+                }
+                break
+    except Exception:  # noqa: BLE001
+        info["rundb"] = None
+
+    output = json.dumps(info, indent=2, default=str)
+    print(output)
     return 0
 
 
@@ -1061,6 +1807,20 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_ps(args)
     if args.subcommand == "logs":
         return _cmd_logs(args)
+    if args.subcommand == "stop":
+        return _cmd_stop(args)
+    if args.subcommand == "rm":
+        return _cmd_rm(args)
+    if args.subcommand == "wait":
+        return _cmd_wait(args)
+    if args.subcommand == "inspect":
+        return _cmd_inspect(args)
+    if args.subcommand == "commit":
+        return _cmd_commit(args)
+    if args.subcommand == "stats":
+        return _cmd_stats(args)
+    if args.subcommand == "cp":
+        return _cmd_cp(args)
     if args.subcommand == "explain":
         return _cmd_explain(args)
     if args.subcommand == "scan":
