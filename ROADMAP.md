@@ -1,24 +1,88 @@
 # jailrun — Roadmap to 1.0
 
-The path from today's 0.1.0 (one image proven end-to-end, gaps documented
-honestly) to a 1.0 someone can bet a workflow on. Milestones are ordered and
-sized (S/M/L), not dated — each ships when its exit criteria pass, and the
-criteria are written to be checkable, not aspirational.
+The path from 0.1.0 (one image proven end-to-end, gaps documented honestly)
+to a 1.0 someone can bet a workflow on. Milestones are ordered and sized
+(S/M/L), not dated — each one ships a working capability, in sequence,
+below. The 1.0 tag itself is gated on something separate: four bars defined
+in "What 1.0 means," which scale and verify continuously rather than
+snapping to "done" the moment a milestone's mechanism lands. Conflating
+those two things is what made earlier drafts of this document look broken —
+this version keeps them apart.
+
+**Where things stand:** every milestone below has shipped its capability —
+the full `docker run`-shaped surface runs end to end on FreeBSD 15.1. The
+project is **alpha**: three of the four 1.0 bars are still open
+(see below). Current tag: `v1.0.0-alpha.2`; the next tag is
+`v1.0.0-alpha.3`. Pre-1.0 tags stay `-alpha.N` until "Closing the 1.0 bar"
+is fully checked off, then move to `-beta.N` for a true
+feature-complete/hardening-only stage, and then to `1.0.0`.
 
 ## What 1.0 means
 
-1.0 is not "feature-complete forever"; it is a specific bar:
+1.0 is not "feature-complete forever"; it is four specific, checkable bars.
 
 1. **Legible** — for any OCI image, `jailrun explain` answers "will this run,
    how, and what would make it better" without the user reading source.
+   **Met.** `jailrun explain` and `jailrun doctor` ship, work, and are
+   covered by tests; nothing outstanding here.
 2. **Covered** — the provider registry is verified data, not guesses: every
    shipped mapping carries machine-checkable evidence, and the top popular
    images have known, published verdicts.
+   **Not yet.** `provider-map.json` lists 343 mappings; `verification.json`
+   — the evidence record — covers 53 of them, all at L2. A mapping with no
+   evidence record is L0 by this document's own definition, so ~290 entries
+   ship unverified today. Separately, `runtime/scan.py` (the compat-matrix
+   tool) has been run against 9 images; no matrix is published in-repo yet.
 3. **Contained** — the sandbox has survived a deliberate adversarial
    campaign, network isolation is destination-scoped (not all-or-nothing),
    and host-side code runs with the least privilege FreeBSD allows.
+   **Not yet.** The internal side is done: an extraction jail, a 35-test
+   adversarial layer corpus, and a 10-technique jail-escape campaign, all
+   clean. Destination-scoped `--network allow` ships and has a live
+   FreeBSD exit-test. Nested-jail devfs (a real `/dev/mem`-disclosure gap
+   when jailrun runs inside another jail) is fixed as of 2026-07-26 — see
+   `engine._devfs_delegation_available()` and `jailrun doctor`'s
+   `devfs_delegation` check — with no new privileged process, once the
+   outer jail is configured to delegate ruleset 4. What's missing: no
+   external human security review has
+   been commissioned yet, and Capsicum was never implemented —
+   `docs/THREAT-MODEL.md` names that the single biggest structural gap.
 4. **Boring** — parallel runs don't race, crashes recover, teardown never
    leaks datasets or jails, and the API/schema is frozen under semver.
+   **Nearly.** The soak test (100 runs, 8-way parallelism, zero leaks,
+   median 0.623s time-to-jexec) and crash-recovery (`gc --fix` against a
+   real SIGKILL corpus) are done. Two loose ends: those results live only as
+   prose in this file and `CHANGELOG.md`, not as a saved artifact the way
+   the 0.7 performance numbers are (`bench/results/*.json`); and "frozen
+   under semver" / "no known-unsafe defaults" are asserted in a changelog
+   entry rather than written down as policy in `SECURITY.md`.
+
+## Closing the 1.0 bar
+
+The concrete, checkable list — each item traces back to one of the four
+pillars above:
+
+1. **(Covered)** Backfill `verification.json` from 53 to ≥150 entries at
+   ≥L2 on a real FreeBSD host; harden the CI drift job to assert that count
+   instead of validating schema shape alone.
+2. **(Covered)** Publish a compat-matrix data file in-repo, scanned against
+   a stated, honest image count — grow from the current 9 toward the 500
+   target and record whatever number this release actually commits to.
+3. **(Contained)** Commission one external human security review; address
+   its findings or record explicit accepted-risk decisions in
+   `SECURITY.md`. Resolve Capsicum one way or the other — implement it
+   where the surrounding libraries permit, or reclassify it in
+   `THREAT-MODEL.md` as a permanent, stated non-goal.
+4. **(Boring)** Persist the soak-test and `--network allow` live-test runs
+   as machine-checkable JSON artifacts, mirroring `bench/results/*.json`.
+5. **(Boring)** Write "frozen under semver" and "no known-unsafe defaults"
+   down as actual policy in `SECURITY.md` — not just narrated in a
+   changelog entry.
+6. A clean, internally consistent `CHANGELOG.md` from 0.1 through 1.0: one
+   entry per shipped version, no duplicate or orphaned sections.
+
+**Exit:** all six items above closed; semver-1.0 tag cut on GitHub; no open
+issues tagged `security` or `blocker`.
 
 ## The scaling bet: verification agents instead of a crowd
 
@@ -48,13 +112,19 @@ Three design consequences:
    | **L4** | proven — a real image's end-to-end run exercised it | E2E workload (like the ESP32 compile) |
 
    `jailrun explain` surfaces the level per binary, so "works" is never
-   conflated with "we checked".
+   conflated with "we checked". A mapping with no evidence record at all is
+   L0, full stop — regardless of how plausible the name-derived guess looks.
 3. **Verification is replayable.** An agent's claim is only as good as its
    evidence; CI re-runs L1/L2 checks deterministically on merge, and a
    scheduled drift job re-verifies the registry against the latest pkg
    quarterly branch, demoting entries that stop passing.
 
 ## Milestones
+
+Every milestone below shipped its capability in full. Where a milestone's
+original scope included a scale or rigor target (registry coverage, an
+external review, matrix breadth, persisted evidence), that target is tracked
+once, under "Closing the 1.0 bar" above — not repeated here.
 
 ### 0.2 — Legibility & operator UX (S)
 
@@ -73,9 +143,9 @@ answer it.
 - Error-message pass over the top failure modes: actionable text, no stack
   traces for expected failures.
 
-**Exit:** a user who has never read the source can (a) predict whether an
-image will run, (b) diagnose a broken host, (c) list what's running —
-without asking anyone.
+**Shipped.** A user who has never read the source can predict whether an
+image will run, diagnose a broken host, and list what's running — without
+asking anyone.
 
 ### 0.3 — Provider registry + verification pipeline (L)
 
@@ -97,8 +167,9 @@ The agent bet, part one — see "The scaling bet" above.
 - Weekly drift job against the latest pkg quarterly branch; failures demote
   the entry and open a task.
 
-**Exit:** zero L0 entries shipped; ≥150 entries at ≥L2; drift job green two
-consecutive weeks.
+**Shipped.** The data model, the evidence ladder, and the backfill/verify
+tooling are live and working. Growing verified coverage to the registry's
+full size is tracked under "Covered" above.
 
 ### 0.4 — Destination-scoped network: VNET + pf (M)
 
@@ -112,8 +183,9 @@ all-or-nothing.
 - DNS story documented (names resolved at rule-build time + resolver allowed
   on 53; the TOCTOU tradeoff stated, not hidden).
 
-**Exit:** a live CI test on FreeBSD where the allowed fetch succeeds and
-egress to any other destination fails.
+**Shipped.** A live CI test on FreeBSD confirms the allowed fetch succeeds
+and egress to any other destination fails — automated in 0.9's
+`bench/network_allow_live.py`.
 
 ### 0.5 — Runtime completeness & reliability (L)
 
@@ -134,7 +206,7 @@ Make the `docker run` shape actually complete, then make it boring.
   analogy from `cputime`; `devfs_ruleset` exercised against a hardened
   devfs configuration.
 
-**Exit:** 1000-run soak at 8-way parallelism with zero leaked jails,
+**Shipped.** 1000-run soak at 8-way parallelism, zero leaked jails,
 datasets, or mounts; kill-recovery test green; docker-run parity table green
 for everything not listed under non-goals.
 
@@ -152,8 +224,12 @@ for everything not listed under non-goals.
   becomes a regression test. Followed by one external human security review.
 - `SECURITY.md` + response policy.
 
-**Exit:** zero unresolved escapes from the campaign; the full corpus runs
-clean in CI; external-review findings addressed or explicitly accepted.
+**Shipped.** The extraction jail, the adversarial layer corpus, and the
+internal 10-technique jail-escape campaign are live and clean. Nested-jail
+devfs delegation (2026-07-26) closes a real `/dev/mem`-disclosure gap for
+nested deployments with no new daemon — see CHANGELOG.md. The external
+review this milestone also called for, and the Capsicum decision, are
+tracked under "Contained" above.
 
 ### 0.7 — Coverage at scale & performance (L)
 
@@ -174,10 +250,10 @@ The agent bet, part two — breadth.
   a single host, measuring wall-clock throughput, rctl isolation (one
   OOM-killed run must never affect its neighbour), and teardown latency.
 
-**Exit:** the top-500 compat matrix published and CI-regenerated monthly;
-`jailrun explain $RANDOM_IMAGE` returns a verdict for 90%+ of queries;
-p50 jail-creation latency under 3s on reference hardware (4-core FreeBSD VM,
-SSD-backed ZFS).
+**Shipped.** The performance budget is met (0.152s avg cached, well under
+the 3s target), the manifest cache is real, and the scanning tool
+(`runtime/scan.py`) is live, proven against 9 images so far. Publishing the
+matrix at scale is tracked under "Covered" above.
 
 ### 0.8 — Distribution & packaging (S)
 
@@ -199,10 +275,10 @@ Before 1.0, running jailrun must not require `git clone && pip install`.
   auto-built by CI on tag push. `CHANGELOG.md` is the canonical release
   notes, not a manually-rewritten GitHub description.
 
-**Exit:** a first-time FreeBSD user can `pkg install jailrun && jailrun run
---help` without reading anything else and get a useful response.
+**Shipped.** A first-time FreeBSD user can `pkg install jailrun && jailrun
+run --help` without reading anything else and get a useful response.
 
-### 0.9 — Production hardening & soak (M) — DONE (2026-07-24, commit 29c5faa)
+### 0.9 — Production hardening & soak (M)
 
 The gap between "works for me on a dev VM" and "I'd run this in prod for
 untrusted user code". Each item is sized to be independently verifiable.
@@ -230,35 +306,14 @@ untrusted user code". Each item is sized to be independently verifiable.
   (cached image, no Linuxulator, `--network none`): median 0.623s
   (3.2× under the 2s target). Profiled during soak.
 
-**Exit:** soak green (100 × 8-way, zero leaks); `--network allow` exit-test
-green; SIGKILL-at-every-stage corpus leaves no orphans after `gc --fix`;
-doctor catches missing pf hooks. Everything that will ship in 1.0 has been
-exercised under load, not just unit-tested.
+**Shipped.** Soak green (100 × 8-way, zero leaks); `--network allow`
+exit-test green; SIGKILL-at-every-stage corpus leaves no orphans after
+`gc --fix`; doctor catches missing pf hooks. Persisting these results as a
+machine-checkable artifact (rather than prose) is tracked under "Boring"
+above.
 
-### 1.0 — Production readiness (S) — 🚧 ALPHA 2026-07-25 (tag v1.0.0-alpha.1)
-
-The final gate — not a feature milestone, a stability and documentation
-milestone.
-
-- `CHANGELOG.md` complete from 0.1 to 1.0, with upgrade notes.
-- Public API (CLI flags, exit codes, environment variables, the provider
-  registry format, the substitution manifest schema) frozen under semver:
-  any incompatible change after 1.0 bumps the major version.
-- `jailrun doctor` passes on a stock FreeBSD 14.x/15.x install after
-  following `SECURITY.md` + `CONTRIBUTING.md`.
-- At least one end-to-end tutorial in `README.md`: "compile an ESP32
-  firmware on FreeBSD in 5 minutes", reproducing the original proof that
-  motivated the project.
-- No known-unsafe defaults: every documented security gap has at least a
-  workaround or explicit opt-in warning, nothing is silently insecure.
-- Release artifacts: the `jailrun` binary is distributable as a single-file
-  Python zipapp (or compiled binary via Nuitka/PyInstaller) with vendored
-  dependencies, so a user needs only `pkg install jailrun` or a single
-  download, not a `git clone && pip install` dance.
-
-**Exit:** semver-1.0 tag on GitHub; the tutorial works from a fresh FreeBSD
-install; `pip install jailrun` (or `pkg install jailrun`) produces a working
-binary; no open issues tagged `security` or `blocker`.
+1.0 itself isn't a capability milestone — it's the gate defined in "What 1.0
+means" and "Closing the 1.0 bar" above.
 
 ## Beyond 1.0
 

@@ -2,116 +2,358 @@
 
 All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); this project adheres to
-[Semantic Versioning](https://semver.org/).
+[Semantic Versioning](https://semver.org/). Pre-release identifiers use the semver form
+(`1.0.0-alpha.1`); `pyproject.toml` carries the PEP 440 equivalent (`1.0.0a1`), since
+that's what Python packaging requires — the two always refer to the same release.
 
-## [0.2.0] - 2026-07-24
+**A note on versions below 0.6:** roadmap milestones 0.3, 0.4, and 0.5 shipped as
+untagged commits made between the `v0.2.0` and `v0.6.0` git tags. The entries below use
+the roadmap's own numbering for clarity; they don't correspond to a dedicated git tag.
 
-### Added — roadmap 0.4 destination-scoped network
+Pre-1.0 tags use `-alpha.N` until "Closing the 1.0 bar" in [ROADMAP.md](ROADMAP.md)
+closes, then `-beta.N` for a true feature-complete/hardening-only stage, then `1.0.0`.
+
+## [Unreleased]
+
+### Added (2026-07-26) — nested-jail devfs delegation
+- **`engine._devfs_delegation_available()`**: when jailrun itself runs
+  nested (inside another application's jail), probes for real whether the
+  outer jail delegates devfs ruleset 4 to its own children — creates and
+  immediately tears down one throwaway jail with a bare `mount.devfs;` and
+  checks the ruleset it actually receives. Delegation succeeds, with no
+  daemon and no new privileged process, exactly when the outer jail was
+  itself created with `allow.mount allow.mount.devfs enforce_statfs=1
+  devfs_ruleset=4 children.max>=1`; without those bits the probe's own
+  `mount.devfs;` fails with "Operation not permitted" and jailrun knows to
+  fall back.
+- **`engine._build_jail_conf()`**: leaves `mount.devfs;` at its natural
+  ruleset-4 default whenever the probe confirms delegation, nested or not.
+  Only forces the unrestricted `devfs_ruleset = 0;` fallback when the probe
+  says delegation isn't available AND the caller has explicitly opted in
+  via `--allow-unrestricted-devfs` — 7 new unit tests in
+  `runtime/test_devfs_delegation.py`.
+- **`jailrun doctor`**: new 9th check, `devfs_delegation` — when nested,
+  reports whether the outer jail delegates devfs ruleset 4, with the exact
+  jail.conf parameters to add if not. Skipped entirely when not nested (the
+  common, non-kolkhoz case is unaffected).
+
+## [1.0.0-alpha.2] - 2026-07-25
+
+The "docker-compatible surface" alpha. Every common `docker run` / `docker exec`
+workflow now has a jailrun equivalent, verified end-to-end on FreeBSD 15.1.
+
+### Added — Daemon mode & container lifecycle
+- **`jailrun run -d [--name NAME]`** — run jails in background (detached).
+  Prints the jail name and returns immediately. Background worker
+  (`runtime/runner.py`) handles the full lifecycle via a JSON job file +
+  `subprocess.Popen`. Duplicate `--name` rejected (checks jls + rundb).
+- **`jailrun stop [--rm] NAME`** — SIGKILL all jail processes (`jexec kill
+  -KILL -1`), remove persist jail (`jail -r`), update rundb. `--rm` also
+  destroys the clone dataset.
+- **`jailrun rm NAME`** — destroy a stopped jail's clone/rootfs dataset.
+  Refuses if the jail is still running.
+- **`jailrun wait NAME`** — tail -f of a jail's log file. Reads from
+  beginning, follows live until the jail stops or Ctrl-C.
+- **`jailrun inspect NAME`** — JSON output with rundb state + live status
+  (jls), like `docker inspect`.
+- **`jailrun logs -f`** — follow mode for `jailrun logs` (tail -f behavior).
+
+### Added — Resource limits & filesystem
+- **`--cpus N`** — CPU core limit, mapped to `cputime:sigkill` rctl rule.
+- **`--memory SIZE`** — memory limit (e.g. `4g`, `512m`), mapped to
+  `memoryuse:sigkill` rctl rule.
+- **`--read-only`** — mount rootfs dataset read-only (`zfs set readonly=on`).
+  Applied after all filesystem mutations, before `jail -c`.
+- **`--tmpfs PATH[:SIZE]`** — mount tmpfs at PATH inside the jail.
+  Default 128m. Repeatable. Useful with `--read-only`.
+
+### Added — Interactive mode
+- **`-it`** — pseudo-TTY allocation for interactive use. Uses
+  `pty.openpty()` + `subprocess.Popen` (not `pty.fork()`, which fails in
+  asyncio thread pool). Forwards stdin ↔ PTY master in both directions.
+  Sets terminal to raw mode, restores on exit. Ctrl-C forwarded to jail.
+
+### Added — VNET per-jail network
+- **`--network vnet`** — per-jail virtual network stack with dedicated
+  `epair(4)` interface and private IP (10.101.0.0/30 per jail). Full network
+  isolation: each jail gets its own routing table, ARP cache, and TCP/IP
+  stack. Host-side epair configured with IP + optional pf NAT.
+- **`-p` / `--publish HOST_PORT:CTR_PORT[/PROTO]`** — port forwarding via
+  pf rdr rules. Redirects host ports to the jail's VNET IP. Requires
+  `--network vnet`. Protocol defaults to tcp.
+
+### Added — Image management
+- **`jailrun commit JAIL_NAME [IMAGE_REF]`** — create a new OCI image from
+  a jail's current rootfs state. ZFS snapshot + clone to images tree.
+  Committed images are runnable via `jailrun run <image_id>`.
+  `store.resolve()` checks local images before attempting registry pull.
+- **`jailrun cp SOURCE DEST`** — copy files between host and jail
+  (docker-cp semantics). `JAIL_NAME:path` prefixes a jail path. Uses tar
+  over jexec for efficient streaming. Handles rename when basenames differ.
+
+### Added — Monitoring
+- **`jailrun stats JAIL_NAME`** — live resource usage (memory, PIDs, CPU
+  time) via `rctl -u jail:<name>`. Docker-stats-like table format.
+- **`jailrun exec -d`** — run a command in background inside a running
+  jail. Output appended to the jail's log file.
+
+### Added — Testing & CI
+- **14 unit tests** for daemon mode (`runtime/test_daemon.py`): runner.py
+  job file loading/cleanup, `_cmd_stop`, `_cmd_rm`, `_cmd_wait`, name
+  uniqueness. All run on Linux without FreeBSD.
+- **CI (FreeBSD + jailrun)** workflow: syncs code to FreeBSD 15.1 VM via
+  tar+ssh, runs full test suite natively, then dogfoods by running commands
+  inside jailrun jails (python:3.9-slim + DNS verification).
+- **Zipapp CI**: `jailrun.pyz` built on every push, uploaded as workflow
+  artifact per Python version × commit.
+
+### Added — Distribution
+- **FreeBSD port** (`deploy/freebsd-port/`): Makefile with explicit
+  `GH_TAGNAME`, pkg-descr, pkg-message. Ready for `pkg install jailrun`.
+
+### Fixed
+- **DNS in jails**: `/etc/resolv.conf` copied (not bind-mounted) into jail
+  rootfs when `--network != "none"`. Without this, DNS failed for ALL images.
+- **Bakery/engine log noise**: three WARNING→DEBUG changes for normal
+  graceful-degradation paths (resolve_pkg fallback, shadow-skip, no-bakery-base).
+  `python:3.9-slim` now produces clean one-line output.
+- **Mount containment test**: unmount before temp dir cleanup (was "Device
+  busy" on FreeBSD where nullfs actually succeeds).
+- **`_destroy_dataset`**: retries with `-r` (recursive) for datasets with
+  child snapshots from `jailrun commit`.
+- **`resolv.conf` mount**: was using absolute path → doubled in rootfs;
+  fixed with `shutil.copy2`.
+- **`-it` flag**: was erroring with "not yet implemented" — now works.
+- **`jail_name`**: engine accepts `opts["jail_name"]` for custom names
+  (defaults to auto-generated `jailrun-<id>`).
+
+### Changed
+- `runtime/cli.py` docstring: lists all 15 subcommands.
+- `docs/USAGE.md`: fully rewritten — all subcommands documented with
+  examples, FreeBSD-requirement table expanded, daemon-mode section added.
+- `runtime/runner.py`: `except BaseException: raise` → `except Exception`
+  for graceful error handling; `try/finally` ensures job file cleanup.
+- Tests: 284 total (up from 270 — 14 daemon + parser unit tests).
+
+## [1.0.0-alpha.1] - 2026-07-24
+
+### Added — Production readiness (roadmap 1.0)
+- **ESP32 end-to-end tutorial** (`README.md`): "compile an ESP32 firmware on
+  FreeBSD in 5 minutes" — step-by-step guide from `jailrun doctor` through
+  `jailrun run esphome/esphome:stable esphome compile blink.yaml` to real
+  `.bin`/`.elf` firmware output. Verified from scratch on FreeBSD 15.1.
+- **Public API frozen under semver** *(asserted here; see `ROADMAP.md` 1.0
+  gate — not yet backed by a durable policy doc)*. All CLI flags,
+  environment variables, exit codes, JSON output formats, and the
+  substitution manifest schema are declared stable; incompatible changes
+  after 1.0 bump the major version.
+- **No known-unsafe defaults** *(asserted here; same caveat)*. Every
+  documented security gap has a workaround or explicit opt-in warning:
+  extraction jail (`JAILRUN_EXTRACT_IN_JAIL=1`, documented in
+  `docs/THREAT-MODEL.md`), unrestricted devfs
+  (`--allow-unrestricted-devfs`), full-host network (`--network inherit`),
+  rctl requiring `kern.racct.enable=1`, `--network allow` needing pf anchor
+  hooks (caught by `jailrun doctor`).
+- **Release artifact** (`dist/jailrun.pyz`): 286 KiB self-contained zipapp,
+  works on any FreeBSD 14.x/15.x host with Python 3.10+ and no package
+  dependencies. Also installable via `pip install jailrun` or FreeBSD port.
+- **Version: `1.0.0-alpha.1`** (`pyproject.toml`: `1.0.0a1`).
+- **Self-contained lifecycle**: `bsdos_lifecycled` dependency removed;
+  jail process lifecycle (FREEZE/THAW/KILL) now uses native `jexec kill`.
+- **DNS in jails fixed**: `/etc/resolv.conf` from the host is now
+  bind-mounted into the jail when `--network` is not `none`. Without this,
+  DNS resolution failed for ALL images inside jailrun jails.
+- **`-it` flag is honest**: now errors cleanly instead of silently ignoring.
+
+### Changed
+- `README.md` restructured: old "Quickstart" replaced with the ESP32 tutorial.
+
+## [0.9.0] - 2026-07-24
+
+Production hardening & soak (roadmap 0.9): the gap between "works for me on
+a dev VM" and "I'd run this in prod for untrusted user code."
+
+### Added
+- **Soak test** (`bench/soak.py`): 100 runs at 8-way parallelism — zero
+  leaks, zero failures, median 0.623s time-to-jexec. *(Result recorded here
+  in prose only — persisting it as a JSON artifact like `bench/results/*.json`
+  is tracked in `ROADMAP.md`'s 1.0 gate.)*
+- **Live exit-test for `--network allow`** (`bench/network_allow_live.py`):
+  creates a jail with `allow=<ext_if>:443`, verifies allowed egress
+  succeeds and a non-allowed destination is blocked, verifies the pf
+  sub-anchor lifecycle, and confirms `--rm` cleanup.
+- **Signal resilience harness** (`bench/signal_resilience.py`): SIGKILL at
+  each lifecycle phase (resolve, unpack, clone, jail -c, jexec) — zero
+  orphans after each stage, proven on FreeBSD 15.1.
+- **`jailrun doctor` pf anchor hooks check** (`runtime/doctor.py`): verifies
+  `/etc/pf.conf` contains `nat-anchor "jailrun/*"` and `anchor "jailrun/*"`.
+  Without them, `--network allow` loads a sub-anchor that is never
+  evaluated. Reports as "info", not "fail" — the anchor can be auto-wired
+  by netops at first use, but the check surfaces the gap either way.
+
+### Fixed
+- **`--network allow` jail conf**: added `ip4 = inherit` alongside `ip4.addr`
+  so outbound traffic from the jail uses the host's routing table through
+  the pf anchor. Without this, destination-scoped egress rules cannot match
+  the jail's traffic. Non-DNS TCP/UDP traffic verified working — DNS under
+  Linuxulator remains a known limitation (Alpine musl libc needs explicit
+  resolv.conf).
+- Kill-recovery reconfirmed against the soak corpus: orphan ZFS datasets +
+  stale rundb rows cleaned by the two-pass `gc`.
+
+## [0.8.0] - 2026-07-24
+
+### Added — Distribution & packaging (roadmap 0.8)
+- **`jailrun version`** now prints real version (git describe) + platform + Python info.
+- **Self-contained zipapp** (`dist/jailrun.pyz`, 285 KiB) — `python3 jailrun.pyz run ...`
+  from any FreeBSD 14.x/15.x host without Python package management.
+- **`pyproject.toml`** bumped to 0.7.0, ready for `pip install jailrun`.
+- **GitHub Release workflow** (`.github/workflows/release.yml`) — auto-builds zipapp
+  + SHA256 on `v*` tag push.
+- **`VERSION`** fallback file for non-git deployments.
+
+## [0.7.0] - 2026-07-24
+
+### Added — Coverage at scale & performance (roadmap 0.7)
+- **Pre-computed manifest cache** (`MANIFEST_CACHE_DIR`): persistent substitution
+  manifests keyed by image_id at `/var/cache/jailrun/manifests/<image_id>.json`.
+  Cache hit path runs at 108–119ms (30% faster than probe+bakery).
+- **Profiling baseline**: time-to-jexec for cached alpine measured at 0.152s avg
+  (20× under 3s target).
+- **`jailrun scan`** (`runtime/scan.py`): aggregates native-vs-linuxulator stats
+  across a batch of images — the first step toward the roadmap's top-500 compat
+  matrix, not the matrix itself. **Coverage so far: 9/9 cached images pass**
+  (alpine, busybox, debian, ubuntu, fedora, esphome, jq), all running <200ms
+  with a pre-computed manifest + provisioned base. No matrix data is published
+  yet — see `ROADMAP.md`'s 0.7 status and 1.0 gate.
+- **Bakery graceful degradation**: when `pkg install` fails (e.g. base-system-only
+  binary), bake() now logs a warning and returns manifest with `snapshot_id: None`
+  instead of crashing. Engine falls back to linuxulator for all Linux binaries.
+
+### Fixed
+- `provider-map.json`: `grep`→`gnugrep`, `uv`→`py312-uv` (correct FreeBSD pkg names).
+  Removed `xz`, `whereis`, `telnet`, `traceroute`, `cpio`, `which`, `time`, `watch`
+  (FreeBSD base system utilities, not available as pkgs).
+- `pkg-artifacts.json`: added `gnugrep` and `py312-uv` artifact paths.
+- `engine.py`: `image_id` hoisted to function-local scope for manifest cache key.
+
+## [0.6.0] - 2026-07-24
+
+### Added — Privilege reduction & adversarial campaign (roadmap 0.6)
+- **Extraction jail** (`store.py`): OCI layer extraction runs inside a throwaway
+  FreeBSD jail as `nobody` with no network — tar-parser bugs land in a jail too.
+  Gated by `JAILRUN_EXTRACT_IN_JAIL=1`. Template at `/var/jailrun/extract-jail-template`.
+- **Adversarial layer corpus** (`test_layer_adversarial_extended.py`): 7 new tests
+  (35 total) — absolute symlink to `/etc/passwd`, circular chains, `/dev/sda` symlink,
+  3-hop absolute chain, hardlink inode independence, whiteout-through-absolute-symlink,
+  `_within` circular detection.
+- **Adversarial jail-escape campaign**: 10 techniques tested — all 10 blocked by
+  FreeBSD kernel-level confinement. *(Internal campaign only; the external human
+  review this milestone's exit criterion also calls for hasn't happened yet — see
+  `ROADMAP.md`'s 0.6 status and 1.0 gate.)*
+- **Threat-model update** (`docs/THREAT-MODEL.md`): extraction jail documented,
+  campaign results, residual gaps (opt-in, whiteout still on host, no Capsicum —
+  named there as the single biggest structural gap).
+- **`--remove-signatures`** added to `skopeo copy` in `store.resolve()`.
+
+### Fixed
+- Kill-recovery confirmed: orphan ZFS dataset + stale rundb row cleaned by two-pass gc.
+
+## [0.5.0] - 2026-07-24 — untagged, roadmap milestone only
+
+### Added — Runtime completeness & reliability (roadmap 0.5)
+- **`jailrun exec`** + signal forwarding to the jailed process.
+- **`jailrun logs`**: persist and retrieve run output.
+- **Registry auth** (skopeo credentials passthrough), `image@sha256:` digest
+  pinning with collision fix, **`jailrun pull`**.
+- **Store-level locking + ordered teardown**: parallel runs of the same image
+  are safe by construction; teardown order is `jail -r` → wait for jail death
+  → unmount in reverse → destroy, replacing the earlier retry-with-`-f` loop.
+- **1000-run soak at 8-way parallelism** — zero leaked jails, datasets, or
+  mounts. rctl isolation verified (an OOM-killed run never affects its
+  neighbour).
+- **Kill-recovery**: `jailrun gc --fix` cleans orphaned datasets and stale
+  RunDB rows.
+- **rctl verification** (`scripts/verify-rctl.sh`): `memoryuse`, `pcpu`,
+  `readbps`/`writebps` tested with real resource hogs, not by analogy from
+  the confirmed `cputime` case.
+
+## [0.4.0] - 2026-07-24 — untagged, roadmap milestone only
+
+### Added — Destination-scoped network: VNET + pf (roadmap 0.4)
 - **`--network allow=host[:port][,...]`** — per-jail pf anchor with loopback
   alias IP, NAT, and destination-scoped egress. Pure policy in
   `runtime/netpolicy.py` (16 unit tests, injectable resolver/alloc); host
   effects in `runtime/netops.py` (ifconfig/pfctl shell-outs); wired into
   `engine.py`'s full lifecycle (`apply_network` before `jail -c`,
-  `teardown_network` after `jail -r`). The `_build_jail_conf` already accepted
-  `network='allow'` + `ip4_addr`; now the CLI passes it through and the engine
-  allocates from a 10.99.0.0/24 loopback pool. Design doc at
-  `docs/DESIGN-network.md` with live pf-tagging PoC result.
-- **ROADMAP.md completed** — restored from mid-sentence truncation at 0.7
-  through 1.0 and beyond-1.0 sections.
+  `teardown_network` after `jail -r`). The engine allocates from a
+  10.99.0.0/24 loopback pool. Design doc at `docs/DESIGN-network.md` with a
+  live pf-tagging PoC result.
+- **`netops` auto-wires the host pf anchor hooks** (`nat-anchor "jailrun/*"`
+  / `anchor "jailrun/*"` in `/etc/pf.conf`) and silently falls back to
+  `_ensure_loopback` when they're already present, instead of requiring
+  manual host setup before the first `--network allow` run.
+- Default network stays `none`; `inherit` remains the explicit escape hatch.
 
-### Added (2026-07-24) — roadmap 0.3, L2 ("runs") verification rung
-- **`verify_runs()` in `providers/backfill.py`** — climbs the verification
-  ladder L1→L2: for every entry already at L1 ("exists"), executes its smoke
-  command via an INJECTED runner and bumps verification to "runs" when it exits
-  0. The runner is injected (like `exists` for L1) so the module stays fully
-  unit-testable on Linux; on a FreeBSD host the real runner `jexec`s each
-  smoke command inside a throwaway jail — roadmap 0.3's L2 definition ("executes
-  a smoke command inside a jail, exit 0"). L2 catches binaries that are present
-  on disk (L1) but broken (missing shared lib / won't load) — a real signal
-  beyond L1. Never touches L0 entries (nothing to run) and never invents L3/L4
-  (behaves/proven — differential testing, the harness's job).
-- **`smoke_cmd()` + `SMOKE_ARGS`** — the per-binary smoke invocation. Default
-  `--version`; overrides confirmed live on FreeBSD 15.1 for tools whose version
-  flag differs or is absent: `java -version`, `dash -c 'exit 0'` (no version
-  flag), `lua -v`, `openssl version` (subcommand, not a flag), `unzip -v`.
-- **`providers/verification.json` regenerated** — now **all 53 entries at L2
-  (runs)**, evidence extended per entry with `{method:"smoke-jail",
-  smoke_cmd:[...], exit_code:0}`. Schema `$defs/verification.evidence` gained
-  optional `smoke_cmd`/`exit_code`; CI consistency-check unchanged. Honest note:
-  the L2 jail uses `path=/` (shares the host fs — the binaries' shared libs are
-  visible); deeper per-jail isolation (native-base jail) is a future refinement.
-- **0.3 reached a tangible intermediate state:** registry correctness fixed,
-  **0 L0**, **53/53 @ L1**, **53/53 @ L2**. Remaining to the full 0.3 exit
-  ("≥150 @ ≥L2; drift job green 2 weeks"): enumerate the registry to ≥150
-  binaries (the agent harness over real images), L3/L4 differential testing, and
-  the weekly CI drift-job (still blocked on the `workflow` OAuth scope).
+## [0.3.0] - 2026-07-24 — untagged, roadmap milestone only
 
-### Added (2026-07-24) — roadmap 0.3 backfill (registry driven to 0 L0)
-- **Registry verification backfill (`providers/backfill.py`).** The standalone
-  tool roadmap 0.3 calls for: walks every `provider-map.json` entry, resolves
-  each Linux binary's FreeBSD artifact path reusing bakery's exact resolution
-  (PKG_ARTIFACTS / resolve_pkg / PORT_ARTIFACTS / MULTI_BINARY_PKGS /
-  MULTI_BINARY_SUFFIX), checks whether that path exists on the host, and
-  persists per-binary verification level + an evidence record (host, FreeBSD
-  version, when, how) into a new `providers/verification.json`. Until now
-  verification level lived only inside a per-image manifest at build time
-  (probe stamps L0 "guessed", bakery bumps to L1 "exists"); nothing walked the
-  registry itself and froze the result into data. The host-existence check is
-  injected, so the module is fully unit-testable on Linux with a fake checker;
-  L1 uses bakery's own `Path.exists()` definition verbatim and the tool never
-  invents L2–L4 (runs/behaves/proven — those remain the agent verification
-  harness's job).
-- **`providers/verification.json`** — generated evidence from a real FreeBSD
-  15.1 host: **all 53 shipped entries confirmed at L1 (exists), 0 at L0.**
-  Validated against a new `$defs/verification` in `registry.schema.json`; the
-  CI validator checks it when present and enforces consistency with
-  `provider-map.json` (every key present, every provider string matching).
-- **Registry correctness fixes the backfill surfaced (its intended function) —
-  several shipped mappings were false promises that could never confirm:**
-  - `clang`/`clang++`: `pkg:llvm` is a 4.25 KiB repo stub that installs
-    nothing → corrected to `pkg:llvm22`.
-  - `gcc`/`g++`: `pkg:gcc` is a 20-byte stub → corrected to `pkg:gcc16`.
-  - `scons`: no bare `scons` package exists → corrected to `pkg:scons-py312`.
-  - `esphome`: **no FreeBSD package of any name exists** (ESPHome is
-    pip-installed, not a pkg) → mapping removed; a Linux image's esphome
-    binary now falls back to linuxulator. The ESP32 firmware compile itself
-    uses the native xtensa toolchain (still mapped), which is the load-bearing
-    native path.
-  - `riscv32-esp-elf-gcc`: `port:devel/riscv32-esp-elf` has no real FreeBSD
-    port → mapping removed; falls back to linuxulator.
-  - Wrong artifact paths where the package installs a differently-named binary:
-    `php83`→`/usr/local/bin/php` (not `php83`), `py311-pip`→`/usr/local/bin/pip`,
-    `python310`→`/usr/local/bin/python3.10`, `openjdk21`→`/usr/local/openjdk21/bin/java`.
-- **Versioned multi-binary packages (`providers/multi-binary-suffix.json`).**
-  `gcc16` and `llvm22` install ONLY versioned binaries (`gcc16`/`g++16`,
-  `clang22`/`clang++22`) with no unversioned symlink, so the existing
-  multi-binary rule (resolve to `/usr/local/bin/<basename>`) pointed at paths
-  that don't exist. New per-package version-suffix map (e.g. `gcc16`→`"16"`,
-  `llvm22`→`"22"`; `binutils` stays unsuffixed) is applied in both
-  `bakery.fill_artifact_paths()` and the backfill resolver, loaded through the
-  `providers` package, schema-validated, and CI-guarded.
+### Added — Provider registry + verification pipeline (roadmap 0.3)
+- **Registry extracted to data** (`providers/`): `PROVIDER_MAP` /
+  `PKG_ARTIFACTS` and friends moved out of `probe.py`/`bakery.py` into
+  schema-validated JSON, loaded by both modules; CI validates the schema.
+- **Evidence-record format + L0–L4 ladder** implemented
+  (`registry.schema.json`'s `$defs/verification`).
+- **Registry verification backfill** (`providers/backfill.py`): walks every
+  `provider-map.json` entry, resolves each Linux binary's FreeBSD artifact
+  path via bakery's own resolution tables, checks existence on a real
+  FreeBSD host, and persists the result into `providers/verification.json`.
+  The host-existence check is injected, so the module stays fully
+  unit-testable on Linux with a fake checker.
+- **`verify_runs()`**: climbs L1→L2 — for every entry at L1 ("exists"),
+  executes its smoke command (default `--version`; per-binary overrides for
+  tools that differ: `java -version`, `dash -c 'exit 0'`, `lua -v`,
+  `openssl version`, `unzip -v`) inside a throwaway jail via an injected
+  runner, and bumps to L2 ("runs") on exit 0.
+- **Registry correctness fixes the backfill surfaced** — several shipped
+  mappings were false promises that could never confirm: `clang`/`clang++`
+  (`pkg:llvm` was a stub → `pkg:llvm22`), `gcc`/`g++` (`pkg:gcc` was a stub
+  → `pkg:gcc16`), `scons` (→ `pkg:scons-py312`), `esphome` (no FreeBSD
+  package exists at all — removed, falls back to linuxulator; the native
+  xtensa toolchain mapping that actually matters for the ESP32 build stays),
+  `riscv32-esp-elf-gcc` (no real port — removed), and several binaries whose
+  package installs a differently-named executable (`php83`→`php`,
+  `py311-pip`→`pip`, `python310`→`python3.10`, `openjdk21`→`java`).
+- **Versioned multi-binary packages** (`providers/multi-binary-suffix.json`):
+  `gcc16`/`llvm22` install only versioned binaries with no unversioned
+  symlink; a per-package version-suffix map fixes resolution in both
+  `bakery.fill_artifact_paths()` and the backfill resolver.
+- **Registry expanded to 343 provider mappings** and a **weekly CI drift
+  schedule** added. This grew the *mapping* count well past the ≥150 target,
+  but verification evidence (`verification.json`) was not backfilled for the
+  new entries — it still covers only the original 53, all at L2. See
+  `ROADMAP.md`'s 0.3 status and 1.0 gate for the honest count.
 
 ### Fixed (2026-07-23)
-- **`_merge_tree` special-file handling — contract fix (non-security).** A non-regular,
-  non-symlink, non-directory OCI-layer entry (a FIFO, an AF_UNIX socket, or — as root — a
-  char/block device node) reached the `shutil.copy2()` call in the final else branch of
-  `store/store.py`'s `_merge_tree()`. `shutil.copy2()` → `copyfile()` detects a FIFO via
-  `stat.S_ISFIFO` and raises `shutil.SpecialFileError`; a socket raises a plain `OSError`
-  even earlier inside `open()`. Both are `OSError` subclasses, NEITHER a `store.StoreError`,
-  so a caller catching only `StoreError` (as the rest of `store.py`'s contract implies) would
-  not have caught this crash. The safety property always held — nothing was written into the
-  rootfs, no partial state, no hang (the FIFO guard fires before the destination is ever
-  opened, verified against deliberately-constructed input) — so this is purely an
-  exception-type contract fix, not a vulnerability. `_merge_tree` now detects a non-regular
-  file explicitly (`if not item.is_file()`) and raises `StoreError` naming the offending
-  entry and its `stat.filemode()` type BEFORE `copy2` is ever called. The fail-closed
-  behavior is unchanged (a special-file entry is still refused, never materialized); only
-  the exception type now matches the module's stated contract. Pinned down by
-  `store/test_special_file_handling.py` (FIFO via `os.mkfifo` + AF_UNIX socket via
-  `socket.bind` — the two special-file types representable without root). This closes the
-  "wrong exception type" nit that `test_layer_adversarial.py` /
-  `test_layer_adversarial_extended.py` had documented but deliberately left unfixed while
-  `store.py` was off-limits to those test-only tracks.
+- **`_merge_tree` special-file handling — contract fix (non-security).** A
+  non-regular, non-symlink, non-directory OCI-layer entry (a FIFO, an
+  AF_UNIX socket, or — as root — a char/block device node) reached
+  `shutil.copy2()` in the final else branch of `store/store.py`'s
+  `_merge_tree()`. `copy2()`/`copyfile()` raises `shutil.SpecialFileError`
+  for a FIFO and a plain `OSError` for a socket — both `OSError` subclasses,
+  neither a `store.StoreError`, so a caller catching only `StoreError` (the
+  rest of `store.py`'s stated contract) wouldn't have caught this. The
+  safety property always held — nothing was written into the rootfs, no
+  partial state, no hang — so this was purely an exception-type contract
+  fix, not a vulnerability. `_merge_tree` now detects a non-regular file
+  explicitly and raises `StoreError` naming the offending entry and its
+  file-mode type before `copy2` is ever called. Covered by
+  `store/test_special_file_handling.py`.
+
+## [0.2.0] - 2026-07-24
+
+### Added — Legibility & operator UX (roadmap 0.2)
+- **`ROADMAP.md` completed** — restored from a mid-sentence truncation that
+  had left the 0.7-through-1.0 and beyond-1.0 sections missing.
 
 ## [0.1.0] - 2026-07-20
 
@@ -366,239 +608,11 @@ the pipeline for real; every one of these had sat unexercised through every prio
   unpack path (`umoci` optional). `skopeo copy --override-os linux` confirmed on FreeBSD 15.
 - All source annotated with **sema** semantic-markup contracts.
 
-### Status
-
-## [1.0.0-alpha.2] - 2026-07-25
-
-The "docker-compatible surface" alpha. Every common `docker run` / `docker exec`
-workflow now has a jailrun equivalent, verified end-to-end on FreeBSD 15.1.
-
-### Added — Daemon mode & container lifecycle
-- **`jailrun run -d [--name NAME]`** — run jails in background (detached).
-  Prints the jail name and returns immediately. Background worker
-  (`runtime/runner.py`) handles the full lifecycle via a JSON job file +
-  `subprocess.Popen`. Duplicate `--name` rejected (checks jls + rundb).
-- **`jailrun stop [--rm] NAME`** — SIGKILL all jail processes (`jexec kill
-  -KILL -1`), remove persist jail (`jail -r`), update rundb. `--rm` also
-  destroys the clone dataset.
-- **`jailrun rm NAME`** — destroy a stopped jail's clone/rootfs dataset.
-  Refuses if the jail is still running.
-- **`jailrun wait NAME`** — tail -f of a jail's log file. Reads from
-  beginning, follows live until the jail stops or Ctrl-C.
-- **`jailrun inspect NAME`** — JSON output with rundb state + live status
-  (jls), like `docker inspect`.
-- **`jailrun logs -f`** — follow mode for `jailrun logs` (tail -f behavior).
-
-### Added — Resource limits & filesystem
-- **`--cpus N`** — CPU core limit, mapped to `cputime:sigkill` rctl rule.
-- **`--memory SIZE`** — memory limit (e.g. `4g`, `512m`), mapped to
-  `memoryuse:sigkill` rctl rule.
-- **`--read-only`** — mount rootfs dataset read-only (`zfs set readonly=on`).
-  Applied after all filesystem mutations, before `jail -c`.
-- **`--tmpfs PATH[:SIZE]`** — mount tmpfs at PATH inside the jail.
-  Default 128m. Repeatable. Useful with `--read-only`.
-
-### Added — Interactive mode
-- **`-it`** — pseudo-TTY allocation for interactive use. Uses
-  `pty.openpty()` + `subprocess.Popen` (not `pty.fork()`, which fails in
-  asyncio thread pool). Forwards stdin ↔ PTY master in both directions.
-  Sets terminal to raw mode, restores on exit. Ctrl-C forwarded to jail.
-
-### Added — VNET per-jail network
-- **`--network vnet`** — per-jail virtual network stack with dedicated
-  `epair(4)` interface and private IP (10.101.0.0/30 per jail). Full network
-  isolation: each jail gets its own routing table, ARP cache, and TCP/IP
-  stack. Host-side epair configured with IP + optional pf NAT.
-- **`-p` / `--publish HOST_PORT:CTR_PORT[/PROTO]`** — port forwarding via
-  pf rdr rules. Redirects host ports to the jail's VNET IP. Requires
-  `--network vnet`. Protocol defaults to tcp.
-
-### Added — Image management
-- **`jailrun commit JAIL_NAME [IMAGE_REF]`** — create a new OCI image from
-  a jail's current rootfs state. ZFS snapshot + clone to images tree.
-  Committed images are runnable via `jailrun run <image_id>`.
-  `store.resolve()` checks local images before attempting registry pull.
-- **`jailrun cp SOURCE DEST`** — copy files between host and jail
-  (docker-cp semantics). `JAIL_NAME:path` prefixes a jail path. Uses tar
-  over jexec for efficient streaming. Handles rename when basenames differ.
-
-### Added — Monitoring
-- **`jailrun stats JAIL_NAME`** — live resource usage (memory, PIDs, CPU
-  time) via `rctl -u jail:<name>`. Docker-stats-like table format.
-- **`jailrun exec -d`** — run a command in background inside a running
-  jail. Output appended to the jail's log file.
-
-### Added — Testing & CI
-- **14 unit tests** for daemon mode (`runtime/test_daemon.py`): runner.py
-  job file loading/cleanup, `_cmd_stop`, `_cmd_rm`, `_cmd_wait`, name
-  uniqueness. All run on Linux without FreeBSD.
-- **CI (FreeBSD + jailrun)** workflow: syncs code to FreeBSD 15.1 VM via
-  tar+ssh, runs full test suite natively, then dogfoods by running commands
-  inside jailrun jails (python:3.9-slim + DNS verification).
-- **Zipapp CI**: `jailrun.pyz` built on every push, uploaded as workflow
-  artifact per Python version × commit.
-
-### Added — Distribution
-- **FreeBSD port** (`deploy/freebsd-port/`): Makefile with explicit
-  `GH_TAGNAME`, pkg-descr, pkg-message. Ready for `pkg install jailrun`.
-
-### Fixed
-- **DNS in jails**: `/etc/resolv.conf` copied (not bind-mounted) into jail
-  rootfs when `--network != "none"`. Without this, DNS failed for ALL images.
-- **Bakery/engine log noise**: three WARNING→DEBUG changes for normal
-  graceful-degradation paths (resolve_pkg fallback, shadow-skip, no-bakery-base).
-  `python:3.9-slim` now produces clean one-line output.
-- **Mount containment test**: unmount before temp dir cleanup (was "Device
-  busy" on FreeBSD where nullfs actually succeeds).
-- **`_destroy_dataset`**: retries with `-r` (recursive) for datasets with
-  child snapshots from `jailrun commit`.
-- **`resolv.conf` mount**: was using absolute path → doubled in rootfs;
-  fixed with `shutil.copy2`.
-- **`-it` flag**: was erroring with "not yet implemented" — now works.
-- **`jail_name`**: engine accepts `opts["jail_name"]` for custom names
-  (defaults to auto-generated `jailrun-<id>`).
-
-### Changed
-- `runtime/cli.py` docstring: lists all 15 subcommands.
-- `docs/USAGE.md`: fully rewritten — all subcommands documented with
-  examples, FreeBSD-requirement table expanded, daemon-mode section added.
-- `runtime/runner.py`: `except BaseException: raise` → `except Exception`
-  for graceful error handling; `try/finally` ensures job file cleanup.
-
-## [1.0.0-alpha.1] - 2026-07-25
-
-### Added — Production readiness (roadmap 1.0)
-- **ESP32 end-to-end tutorial** (`README.md`): "compile an ESP32 firmware on
-  FreeBSD in 5 minutes" — step-by-step guide from `jailrun doctor` through
-  `jailrun run esphome/esphome:stable esphome compile blink.yaml` to real
-  `.bin`/`.elf` firmware output. Verified from scratch on FreeBSD 15.1.
-- **Public API frozen under semver.** All CLI flags, environment variables,
-  exit codes, JSON output formats, and the substitution manifest schema are
-  declared stable; incompatible changes after 1.0 bump the major version.
-- **No known-unsafe defaults.** Every documented security gap has a workaround
-  or explicit opt-in warning: extraction jail (`JAILRUN_EXTRACT_IN_JAIL=1`,
-  documented in `docs/THREAT-MODEL.md`), unrestricted devfs
-  (`--allow-unrestricted-devfs`), full-host network (`--network inherit`),
-  rctl requiring `kern.racct.enable=1`, `--network allow` needing pf anchor
-  hooks (caught by `jailrun doctor`).
-- **Release artifact** (`dist/jailrun.pyz`): 286 KiB self-contained zipapp,
-  works on any FreeBSD 14.x/15.x host with Python 3.10+ and no package
-  dependencies. Also installable via `pip install jailrun` or FreeBSD port.
-- **Version: 1.0.0-alpha.1** (pyproject.toml: 1.0.0a1).
-- **Self-contained lifecycle**: `bsdos_lifecycled` dependency removed;
-  jail process lifecycle (FREEZE/THAW/KILL) now uses native `jexec kill`.
-- **DNS in jails fixed**: `/etc/resolv.conf` from the host is now
-  bind-mounted into the jail when `--network` is not `none`. Without this,
-  DNS resolution failed for ALL images inside jailrun jails.
-- **`-it` flag is honest**: now errors cleanly instead of silently ignoring.
-
-### Changed
-- `README.md` restructured: old "Quickstart" replaced with the ESP32 tutorial.
-
-## [Unreleased] — Production hardening & soak (roadmap 0.9)
-
-### Added
-- **`jailrun doctor` pf anchor hooks check** (`runtime/doctor.py`): verifies
-  `/etc/pf.conf` contains `nat-anchor "jailrun/*"` and `anchor "jailrun/*"`.
-  Without them, `--network allow` loads a sub-anchor that is never evaluated.
-- **Live exit-test for `--network allow`** (`bench/network_allow_live.py`):
-  verifies allowed destination reachable, blocked destination rejected, and
-  `--rm` cleanup — using direct IP addresses to bypass Linuxulator DNS quirks.
-- **Signal resilience harness** (`bench/signal_resilience.py`): SIGKILL at each
-  lifecycle phase (resolve, unpack, clone, jail -c, jexec) — zero orphans after
-  each stage, proven on FreeBSD 15.1.
-- **Soak test** (`bench/soak.py`): 100 runs at 8-way parallelism — **zero leaks,
-  zero failures**, median 0.623s time-to-jexec.
-
-### Fixed
-- **`--network allow` jail conf**: added `ip4 = inherit` alongside `ip4.addr` so
-  outbound traffic from the jail uses the host's routing table through the pf
-  anchor. Without this, destination-scoped egress rules cannot match the jail's
-  traffic. Non-DNS TCP/UDP traffic verified working — DNS under Linuxulator
-  remains a known limitation (Alpine musl libc needs explicit resolv.conf).
-
-## [0.8.0] - 2026-07-24
-
-### Added — Distribution & packaging (roadmap 0.8)
-- **`jailrun version`** now prints real version (git describe) + platform + Python info.
-- **Self-contained zipapp** (`dist/jailrun.pyz`, 285 KiB) — `python3 jailrun.pyz run ...`
-  from any FreeBSD 14.x/15.x host without Python package management.
-- **`pyproject.toml`** bumped to 0.7.0, ready for `pip install jailrun`.
-- **GitHub Release workflow** (`.github/workflows/release.yml`) — auto-builds zipapp
-  + SHA256 on `v*` tag push.
-- **`VERSION`** fallback file for non-git deployments.
-
-## [0.7.0] - 2026-07-24
-
-### Added — Coverage at scale & performance (roadmap 0.7)
-- **Pre-computed manifest cache** (`MANIFEST_CACHE_DIR`): persistent substitution
-  manifests keyed by image_id at `/var/cache/jailrun/manifests/<image_id>.json`.
-  Cache hit path runs at 108–119ms (30% faster than probe+bakery).
-- **Profiling baseline**: time-to-jexec for cached alpine measured at 0.152s avg
-  (20× under 3s target).
-- **Coverage matrix: 9/9 cached images pass** — alpine, busybox, debian, ubuntu,
-  fedora, esphome, jq. All run <200ms with pre-computed manifest + provisioned base.
-- **Bakery graceful degradation**: when `pkg install` fails (e.g. base-system-only
-  binary), bake() now logs a warning and returns manifest with `snapshot_id: None`
-  instead of crashing. Engine falls back to linuxulator for all Linux binaries.
-
-### Fixed
-- `provider-map.json`: `grep`→`gnugrep`, `uv`→`py312-uv` (correct FreeBSD pkg names).
-  Removed `xz`, `whereis`, `telnet`, `traceroute`, `cpio`, `which`, `time`, `watch`
-  (FreeBSD base system utilities, not available as pkgs).
-- `pkg-artifacts.json`: added `gnugrep` and `py312-uv` artifact paths.
-- `engine.py`: `image_id` hoisted to function-local scope for manifest cache key.
-
-## [0.6.0] - 2026-07-24
-
-### Added — Privilege reduction & adversarial campaign (roadmap 0.6)
-- **Extraction jail** (`store.py`): OCI layer extraction runs inside a throwaway
-  FreeBSD jail as `nobody` with no network — tar-parser bugs land in a jail too.
-  Gated by `JAILRUN_EXTRACT_IN_JAIL=1`. Template at `/var/jailrun/extract-jail-template`.
-- **Adversarial layer corpus** (`test_layer_adversarial_extended.py`): 7 new tests
-  (35 total) — absolute symlink to `/etc/passwd`, circular chains, `/dev/sda` symlink,
-  3-hop absolute chain, hardlink inode independence, whiteout-through-absolute-symlink,
-  `_within` circular detection.
-- **Adversarial jail-escape campaign**: 10 techniques tested — all 10 blocked by
-  FreeBSD kernel-level confinement.
-- **Threat-model update** (`docs/THREAT-MODEL.md`): extraction jail documented,
-  campaign results, residual gaps (opt-in, whiteout still on host).
-- **`--remove-signatures`** added to `skopeo copy` in `store.resolve()`.
-
-### Fixed
-- Kill-recovery confirmed: orphan ZFS dataset + stale rundb row cleaned by two-pass gc.
-
-## [0.5.0] - 2026-07-24
-
-### Added — Runtime completeness & reliability (roadmap 0.5)
-- **1000-run soak at 8-way parallelism** — zero leaked jails, datasets, or mounts.
-  rctl isolation verified (OOM-killed run never affects neighbour).
-- **Store fast-paths**: resolve/unpack/clone with per-key locking.
-- **Kill-recovery**: `jailrun gc --fix` cleans orphaned datasets and stale RunDB rows.
-- **rctl verification** (`scripts/verify-rctl.sh`): memoryuse, pcpu, readbps/writebps
-  tested with real resource hogs.
-
-## [Unreleased] — Production hardening & soak (roadmap 0.9)
-
-### Added
-- **`jailrun doctor` pf anchor hooks check** (`runtime/doctor.py`): verifies
-  `/etc/pf.conf` contains `nat-anchor "jailrun/*"` and `anchor "jailrun/*"`.
-  Without them, `--network allow` loads a sub-anchor that is never evaluated.
-  Reports as "info" (not fail) — the anchor can be auto-wired by netops at
-  first use, but the check surfaces the gap.
-- **Live exit-test for `--network allow`** (`bench/network_allow_live.py`):
-  creates a jail with `allow=<ext_if>:443`, verifies allowed egress succeeds,
-  verifies pf sub-anchor lifecycles, and confirms `--rm` cleanup.
-- **Signal resilience test harness** (`bench/signal_resilience.py`):
-  framework for staging SIGKILL at each lifecycle phase and verifying
-  `jailrun gc --fix` leaves zero orphans.
-
 [Unreleased]: https://github.com/bzdOS/jailrun/compare/v1.0.0-alpha.2...HEAD
 [1.0.0-alpha.2]: https://github.com/bzdOS/jailrun/compare/v1.0.0-alpha.1...v1.0.0-alpha.2
 [1.0.0-alpha.1]: https://github.com/bzdOS/jailrun/compare/v0.9.0...v1.0.0-alpha.1
 [0.8.0]: https://github.com/bzdOS/jailrun/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/bzdOS/jailrun/compare/v0.6.0...v0.7.0
-[0.6.0]: https://github.com/bzdOS/jailrun/compare/v0.5.0...v0.6.0
-[0.5.0]: https://github.com/bzdOS/jailrun/compare/v0.2.0...v0.5.0
-[0.2.0]: https://github.com/bzdOS/jailrun/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/bzdOS/jailrun/releases/tag/v0.1.0
+[0.6.0]: https://github.com/bzdOS/jailrun/compare/v0.2.0...v0.6.0
+[0.2.0]: https://github.com/bzdOS/jailrun/compare/b189813...v0.2.0
+[0.1.0]: https://github.com/bzdOS/jailrun/commit/b189813

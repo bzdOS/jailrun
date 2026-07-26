@@ -179,6 +179,75 @@ def _is_jailed() -> bool:
         return False
 
 
+# _devfs_delegation_available:start
+#   purpose: empirically test whether the jail jailrun itself is running
+#            inside (when nested) has been configured to delegate devfs
+#            ruleset 4 to its own children -- i.e. whether it was created
+#            with allow.mount / allow.mount.devfs / enforce_statfs=1 /
+#            children.max>=1. Only meaningful when _is_jailed() is True;
+#            callers must check that first.
+#   output: bool -- True if a real throwaway probe jail with a bare
+#           `mount.devfs;` (no explicit ruleset requested) was created
+#           successfully, meaning nested run-jails get the safe, restricted
+#           ruleset 4 with zero opt-in needed. False if the probe failed
+#           (jail(8) returns EPERM the moment the parent lacks the allow.*
+#           bits above) or the environment can't be tested at all
+#           (non-FreeBSD dev host, jail(8) missing).
+#   sideEffects: creates and immediately destroys one throwaway jail plus a
+#                scratch directory under tempfile.mkdtemp(); no caller-visible
+#                state survives this call either way.
+def _devfs_delegation_available() -> bool:
+    """
+    Probe whether nested run-jails can get devfs ruleset 4 natively.
+
+    Empirically confirmed (2026-07-26): a nested jail's own `mount.devfs;`
+    succeeds and correctly gets ruleset 4 -- with NO host-side daemon and NO
+    privileged helper process -- as long as the jail jailrun is itself
+    running inside was created with `allow.mount allow.mount.devfs
+    enforce_statfs=1 devfs_ruleset=4 children.max>=1`. If it wasn't (true for
+    most nested deployments today), the identical `mount.devfs;` fails
+    outright with "Operation not permitted" -- there is no silent
+    unrestricted fallback to guard against at the kernel level; `jail -c`
+    simply refuses, which is exactly what this probe detects. This
+    supersedes an earlier assumption (see CHANGELOG) that nested devfs
+    delegation was categorically kernel-blocked and therefore needed a
+    privileged host-side daemon to work around -- it doesn't; the fix is a
+    configuration requirement on the OUTER jail, not new jailrun-side
+    privilege.
+    """
+    probe_name = f"jailrun-devfs-probe-{os.getpid()}"
+    scratch = tempfile.mkdtemp(prefix="jailrun-devfs-probe-")
+    created = False
+    try:
+        os.makedirs(os.path.join(scratch, "dev"), exist_ok=True)
+        r = subprocess.run(
+            [
+                "jail", "-c",
+                f"path={scratch}",
+                f"name={probe_name}",
+                "persist", "ip4=disable", "ip6=disable", "mount.devfs",
+            ],
+            capture_output=True, timeout=10,
+        )
+        created = r.returncode == 0
+        return created
+    except Exception:
+        return False
+    finally:
+        if created:
+            teardown = subprocess.run(
+                ["jail", "-r", probe_name],
+                capture_output=True, timeout=10,
+            )
+            if teardown.returncode != 0:
+                log.warning(
+                    "devfs-delegation probe jail %s failed to tear down: %s",
+                    probe_name, teardown.stderr.decode(errors="replace").strip(),
+                )
+        shutil.rmtree(scratch, ignore_errors=True)
+# _devfs_delegation_available:end
+
+
 # _load_manifest:start
 #   purpose: resolve the substitution manifest for image_ref, using the cached
 #            file inside the rootfs clone or running probe+bakery on a cache miss
@@ -412,6 +481,13 @@ def _needs_linuxulator(manifest: dict[str, Any]) -> bool:
 #              needs raw sockets (e.g. ping-like diagnostics) — plain jails have no
 #              VNET isolation, so a false-True default let every sandboxed build send
 #              raw packets on the host's network stack for no reason
+#     devfs_delegation_ok: bool — default True; meaningless unless _is_jailed() is
+#              also True. Set to the real result of _devfs_delegation_available() by
+#              the caller. True (or non-nested) means `mount.devfs;` is left to its
+#              natural ruleset-4 default; False means the outer jail can't delegate
+#              ruleset 4, so this function must force the explicit, opt-in-only
+#              ruleset 0 fallback instead (caller has already verified
+#              allow_unrestricted_devfs before getting here in that case).
 #   output:
 #     conf_text: str — complete jail.conf snippet as a string (not written to disk here)
 #   sideEffects: none
@@ -428,6 +504,7 @@ def _build_jail_conf(
     allow_raw_sockets: bool = False,
     ip4_addr: str | None = None,
     epair_if: str | None = None,
+    devfs_delegation_ok: bool = True,
 ) -> str:
     """
     Render a minimal jail.conf snippet for this run.
@@ -467,33 +544,33 @@ def _build_jail_conf(
         "    mount.devfs;",                     # /dev inside jail
     ]
 
-    # [NESTED-JAIL devfs] When jailrun runs on the bare host, `mount.devfs`
-    # defaults to devfs_ruleset 4 (devfsrules_jail), which correctly restricts
-    # the run-jail's /dev to a safe minimal set (null/zero/random/...). But
-    # applying a devfs ruleset is a HOST privilege: a process inside a jail
-    # gets EPERM ("Operation not permitted") the moment jail(8) runs
-    # `mount -t devfs -oruleset=4`, so nested jail creation fails outright.
-    # Verified live on a nested production jail deployment 2026-07-22. When we
-    # are ourselves jailed the only ruleset we may select is 0, so force it
-    # explicitly.
+    # [NESTED-JAIL devfs] `mount.devfs;` defaults to devfs_ruleset 4
+    # (devfsrules_jail), which correctly restricts the run-jail's /dev to a
+    # safe minimal set (null/zero/random/...) — on the bare host AND when
+    # nested, PROVIDED the jail jailrun itself runs inside was created with
+    # `allow.mount allow.mount.devfs enforce_statfs=1 devfs_ruleset=4
+    # children.max>=1` (empirically confirmed 2026-07-26 — see
+    # _devfs_delegation_available()'s docstring and CHANGELOG). If the outer
+    # jail lacks that delegation, the identical `mount.devfs;` fails outright
+    # with EPERM at `jail -c` time rather than silently degrading — so the
+    # only case needing special handling here is the explicit, already
+    # opted-in (--allow-unrestricted-devfs) fallback.
     #
-    # [SECURITY -- KNOWN GAP] ruleset 0 is the UNRESTRICTED devfs: a fresh
-    # devfs mounted inside a jail exposes the FULL host device set (mem, kmem,
-    # raw disks, ...), NOT the parent jail's already-restricted /dev — devfs
-    # does not inherit the parent's ruleset. Jail policy still denies the
-    # privileged operations on most of those nodes, but their mere presence is
-    # a hardening gap that MUST be closed before running genuinely untrusted
-    # code (e.g. user-uploaded C++ compiled through a nested jailrun). Closing
-    # it requires host cooperation (host-mounted ruleset-4 devfs, or
-    # recreating the parent jail with a child-capping devfs setup) and is
-    # tracked as a separate gate.
-    if _is_jailed():
-        lines.append("    devfs_ruleset = 0;")   # only selectable ruleset when nested
+    # [SECURITY] ruleset 0 is the UNRESTRICTED devfs: a fresh devfs mounted
+    # inside a jail exposes the FULL host device set (mem, kmem, raw disks,
+    # ...). Only ever selected here when the caller has already confirmed
+    # devfs_delegation_ok is False AND the operator explicitly passed
+    # --allow-unrestricted-devfs (see the run() guard) — never a silent
+    # default.
+    if _is_jailed() and not devfs_delegation_ok:
+        lines.append("    devfs_ruleset = 0;")   # explicit opt-in fallback only
         log.warning(
-            "jailrun is running inside a jail: nested run-jail /dev uses the "
-            "UNRESTRICTED devfs ruleset 0 (host devfs cannot delegate ruleset 4 "
-            "from within a jail). Safe for trusted workloads; HARDEN before "
-            "running untrusted code."
+            "jailrun is running inside a jail that does not delegate devfs "
+            "ruleset 4 (missing allow.mount.devfs/enforce_statfs/children.max "
+            "on the outer jail): nested run-jail /dev uses the UNRESTRICTED "
+            "devfs ruleset 0. Safe for trusted workloads; HARDEN before "
+            "running untrusted code -- configure the outer jail instead (see "
+            "ROADMAP.md) so this warning stops firing."
         )
 
     if allow_raw_sockets:
@@ -1247,28 +1324,31 @@ async def _run_async(
     jexec_timeout: float | None = opts.get("timeout", DEFAULT_JEXEC_TIMEOUT_S)
     allow_unrestricted_devfs: bool = opts.get("allow_unrestricted_devfs", False)
 
-    # [SECURITY] Fail closed on the confirmed devfs gap. When jailrun runs
-    # nested (inside a jail), the only devfs ruleset it can select for its own
-    # run-jails is 0 (unrestricted) -- applying ruleset 4 is a host-only
-    # privilege (PRIV_DEVFS_RULE), not delegable to a jail via any allow.*
-    # flag. Verified live 2026-07-23: a process inside such a nested run-jail
-    # can actually `dd if=/dev/mem` and read real bytes (rc=0) -- this is not
-    # cosmetic, it is a genuine physical-memory-disclosure primitive reachable
-    # by anything that runs inside the sandbox, i.e. by the untrusted code the
-    # sandbox exists to contain. Refuse by default; callers that have verified
-    # their own workload is trusted (manual verification/testing, NOT
-    # production untrusted-upload compiles) can opt in explicitly.
-    if _is_jailed() and not allow_unrestricted_devfs:
-        raise RuntimeError(
-            "refusing to run: jailrun is nested (inside a jail) and cannot "
-            "apply a restricted devfs ruleset to its own run-jails -- the "
-            "sandbox's /dev would be unrestricted (verified: /dev/mem is "
-            "readable from inside such a run-jail). This is unsafe for "
-            "untrusted code. Pass opts['allow_unrestricted_devfs']=True (or "
-            "--allow-unrestricted-devfs) only for trusted/manual testing; "
-            "see ROADMAP.md for the real fix (a host-side privileged helper "
-            "to apply devfs ruleset 4 to nested run-jails)."
-        )
+    # [SECURITY] devfs ruleset for nested run-jails. Empirically confirmed
+    # 2026-07-26 (see _devfs_delegation_available()'s docstring): when
+    # jailrun runs nested, its own run-jails get a properly restricted
+    # ruleset-4 /dev for free, with no daemon and no jailrun-side privilege,
+    # PROVIDED the outer jail was created with `allow.mount
+    # allow.mount.devfs enforce_statfs=1 devfs_ruleset=4 children.max>=1`.
+    # Only refuse (or fall back to the unrestricted, opt-in ruleset 0) when
+    # that outer-jail delegation genuinely isn't there.
+    devfs_delegation_ok = True
+    if _is_jailed():
+        devfs_delegation_ok = _devfs_delegation_available()
+        if not devfs_delegation_ok and not allow_unrestricted_devfs:
+            raise RuntimeError(
+                "refusing to run: jailrun is nested (inside a jail) and that "
+                "outer jail does not delegate devfs ruleset 4 to its own "
+                "children -- this run-jail's /dev would be unrestricted "
+                "(verified: /dev/mem is readable from inside such a "
+                "run-jail). This is unsafe for untrusted code. Fix it at the "
+                "source: recreate the OUTER jail with `allow.mount "
+                "allow.mount.devfs enforce_statfs=1 devfs_ruleset=4 "
+                "children.max>=1` (see ROADMAP.md) -- no jailrun-side change "
+                "needed once that's set. Until then, pass "
+                "opts['allow_unrestricted_devfs']=True (or "
+                "--allow-unrestricted-devfs) only for trusted/manual testing."
+            )
 
     # START_RESOLVE_AND_UNPACK
     # ------------------------------------------------------------------
@@ -1605,6 +1685,7 @@ async def _run_async(
             allow_raw_sockets=allow_raw_sockets,
             ip4_addr=_vnet_jail_ip or _jail_ip,
             epair_if=_vnet_jail_if,
+            devfs_delegation_ok=devfs_delegation_ok,
         )
 
         # Write jail.conf to a tempfile.

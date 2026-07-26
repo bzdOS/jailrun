@@ -2,7 +2,7 @@
 
 **A `docker run`-shaped runtime for FreeBSD — backed by jails, not a daemon.**
 
-![status: 1.0-alpha.2](https://img.shields.io/badge/status-1.0--alpha.2-yellow)
+![status: 1.0-alpha](https://img.shields.io/badge/status-1.0--alpha-yellow)
 ![license: MIT](https://img.shields.io/badge/license-MIT-blue)
 ![platform: FreeBSD](https://img.shields.io/badge/platform-FreeBSD%2015-red)
 [![CI](https://github.com/bzdOS/jailrun/actions/workflows/ci.yml/badge.svg)](https://github.com/bzdOS/jailrun/actions/workflows/ci.yml)
@@ -47,7 +47,14 @@ time**: run native where we can, use Linuxulator only where we must.
 
 The core pipeline runs end to end on FreeBSD 15.x: pull an OCI image, resolve
 native substitutes, provision a FreeBSD base dataset, and exec the workload
-inside a hardened jail — all through a single `jailrun run` command.
+inside a hardened jail — all through a single `jailrun run` command. The full
+`docker run`-shaped CLI surface (daemon mode, VNET, commit/cp, stats, `-it`,
+resource limits) is in place and tested. It's alpha because three
+things a 1.0 needs aren't there yet: most of the provider registry lacks
+verification evidence, no external security review has happened, and the
+compat matrix covers 9 images, not the hundreds a "will this run" answer
+needs to be trustworthy at scale. See [ROADMAP.md](ROADMAP.md) for the exact
+bar and what's left to clear it.
 
 Sandbox hardening is verified against deliberately-bad input:
 - **Network default-deny** — jails get no network unless `--network inherit` or

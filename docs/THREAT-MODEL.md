@@ -3,9 +3,13 @@
 **Status: 1.0-alpha.** This document describes what jailrun actually defends
 today, grounded in the real code (not the aspiration), and is explicit about
 what it does not defend yet. It is part of the 0.6 milestone ("privilege
-reduction & adversarial campaign") — see [ROADMAP.md](../ROADMAP.md)'s "Known
-gaps" section, which this document expands on rather than duplicates.
-*Last updated: 2026-07-24 (1.0-alpha: public API frozen, soak-tested, all 0.6–0.9 exit criteria met).*
+reduction & adversarial campaign") — see [ROADMAP.md](../ROADMAP.md)'s
+"Closing the 1.0 bar" section, which this document expands on rather than
+duplicates.
+*Last updated: 2026-07-25. The internal adversarial campaign (10 techniques)
+and soak testing are done and clean; the external human security review and
+the Capsicum item below remain open — this file is not claiming they're
+resolved.*
 
 jailrun's job is to run an **untrusted OCI image** — arbitrary Linux
 userland pulled from a registry, content jailrun's authors never saw — inside
@@ -256,12 +260,16 @@ jail" and "not."
   (`8g`, `400`, `3600`, `200m`) are explicitly "provisional... NOT yet
   fully profiled against a real esphome/platformio build" per the comment
   above `DEFAULT_RCTL_RULES`.
-- **`devfs_ruleset` is never set explicitly.** `_build_jail_conf` only
-  emits `mount.devfs;` with no `devfs_ruleset=` parameter, so the jail gets
-  whichever devfs ruleset the *host* has configured as its default — which
-  is outside jailrun's control and has only ever been exercised against a
-  default (non-hardened) devfs configuration (ROADMAP.md: "never exercised
-  against a hardened FreeBSD devfs configuration").
+- **Nested devfs delegation depends on the outer jail's own config.**
+  `_build_jail_conf` leaves `mount.devfs;` at its natural ruleset-4 default
+  and probes (`_devfs_delegation_available()`) whether the outer jail
+  actually delegates that ruleset to its children. When it doesn't — the
+  outer jail is missing `allow.mount allow.mount.devfs enforce_statfs=1
+  devfs_ruleset=4 children.max>=1` — jailrun fails closed unless the
+  operator explicitly opts in via `--allow-unrestricted-devfs`, which then
+  runs with the full unrestricted host device set. `jailrun doctor` reports
+  the exact parameters to add. The compat matrix has not yet exercised this
+  against a hardened (non-default) devfs configuration end to end.
 - **`rctl` requires `kern.racct.enable=1`, a boot-time loader tunable.**
   `_apply_rctl` degrades gracefully (logs a warning, applies nothing) if
   racct is off — which means on a host where the operator forgot to set

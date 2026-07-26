@@ -6,11 +6,19 @@ jailrun is greenfield systems software. It runs untrusted OCI image content —
 including a layer *unpack* step that runs as root on the host — inside FreeBSD
 jails, and it has **not** had a formal security audit. Sandbox hardening
 (network default-deny, `rctl` limits, timeouts, the two fixed symlink-escape
-bugs) is verified against deliberately-bad input during development, which is
-not the same claim as "audited." See [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md)
+bugs, a 10-technique internal jail-escape campaign) is verified against
+deliberately-bad input during development, which is not the same claim as
+"audited by someone who didn't write the code." An external human security
+review is a tracked, not-yet-scheduled requirement before this project calls
+itself anything past alpha — see [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md)
 for the honest, current breakdown of what's defended, how, and what isn't
 yet — read that first if you're deciding whether something you found is
 already a known, documented gap.
+
+**Frozen-under-semver policy:** not yet written down as policy here. Until
+this section says otherwise, no part of the CLI, exit codes, environment
+variables, or the provider/manifest schemas should be treated as stable
+across versions.
 
 Given that status, please report security issues even if you're unsure
 whether they're "real" — a false positive costs us little; a missed report

@@ -9,7 +9,7 @@
 """
 jailrun doctor — host readiness inspector.
 
-Runs eight checks:
+Runs nine checks:
    1. os_is_freebsd — platform.system() == 'FreeBSD'
    2. skopeo_present — shutil.which('skopeo') is not None
    3. bsdtar_present — shutil.which('bsdtar') is not None
@@ -17,7 +17,10 @@ Runs eight checks:
    5. racct_enabled — sysctl -n kern.racct.enable == '1' (FreeBSD only)
    6. linux64_loaded — kldstat -q -m linux64 exits 0 (FreeBSD only, report as "info" not fail)
    7. pkg_trust_keys — os.path.isdir('/usr/share/keys/pkg') (FreeBSD only)
-   8. pf_anchor_hooks — /etc/pf.conf contains nat-anchor and anchor for jailrun (FreeBSD only)
+   8. devfs_delegation — when nested, whether the outer jail delegates devfs
+      ruleset 4 to its children (FreeBSD only, skip if not nested; report as
+      "info" not fail — the fix is config on a jail this process doesn't own)
+   9. pf_anchor_hooks — /etc/pf.conf contains nat-anchor and anchor for jailrun (FreeBSD only)
 
 Each check returns a CheckResult with: name, status (ok|fail|skip|info), detail, fix.
 Never raises—FileNotFoundError, CalledProcessError, OSError all map to "fail" or "skip".
@@ -418,17 +421,89 @@ def _check_pf_anchor_hooks() -> CheckResult:
 # _check_pf_anchor_hooks:end
 
 
+# _check_devfs_delegation:start
+#   purpose: when jailrun runs nested (inside another jail), verify that outer
+#            jail delegates devfs ruleset 4 to its own children, so nested
+#            run-jails get a restricted /dev with no --allow-unrestricted-devfs
+#            escape hatch needed
+#   input: none
+#   output: CheckResult with status ok/info/skip; skip when not FreeBSD or not
+#           running nested; info (not fail — same treatment as pf_anchor_hooks,
+#           since the operator-facing fix is config on a jail this process does
+#           not own) when nested and delegation is missing
+#   sideEffects: when nested, runs engine._devfs_delegation_available(), which
+#                creates and destroys one throwaway probe jail; never raises
+def _check_devfs_delegation() -> CheckResult:
+    """Check whether a nested outer jail delegates devfs ruleset 4 (FreeBSD only)."""
+    if platform.system() != "FreeBSD":
+        return CheckResult(
+            name="devfs_delegation",
+            status="skip",
+            detail="skipped (not FreeBSD)",
+            fix="",
+        )
+
+    try:
+        from runtime.engine import _devfs_delegation_available, _is_jailed  # noqa: PLC0415
+    except Exception as exc:
+        return CheckResult(
+            name="devfs_delegation",
+            status="info",
+            detail=f"could not check (runtime.engine import failed: {exc})",
+            fix="",
+        )
+
+    if not _is_jailed():
+        return CheckResult(
+            name="devfs_delegation",
+            status="skip",
+            detail="not running nested — jailrun is on the bare host, "
+            "mount.devfs already gets ruleset 4 natively",
+            fix="",
+        )
+
+    if _devfs_delegation_available():
+        return CheckResult(
+            name="devfs_delegation",
+            status="ok",
+            detail="outer jail delegates devfs ruleset 4 — nested run-jails "
+            "get a restricted /dev with no opt-in needed",
+            fix="",
+        )
+
+    return CheckResult(
+        name="devfs_delegation",
+        status="info",
+        detail="outer jail does not delegate devfs ruleset 4 to its "
+        "children — nested `jailrun run` refuses by default "
+        "(or falls back to an unrestricted /dev under "
+        "--allow-unrestricted-devfs)",
+        fix="recreate the OUTER jail (the one jailrun itself runs inside) "
+        "with:\n"
+        "    allow.mount;\n"
+        "    allow.mount.devfs;\n"
+        "    enforce_statfs = 1;\n"
+        "    devfs_ruleset = 4;\n"
+        "    children.max = <N>;\n"
+        "No jailrun-side change is needed once these are set — nested "
+        "run-jails will get ruleset 4 automatically. See ROADMAP.md.",
+    )
+
+
+# _check_devfs_delegation:end
+
+
 # ---------------------------------------------------------------------------
 # Main check runner and renderer
 # ---------------------------------------------------------------------------
 
 # run_checks:start
-#   purpose: execute all eight host readiness checks
+#   purpose: execute all nine host readiness checks
 #   input: none
 #   output: list[CheckResult] — one result per check, in order
-#   sideEffects: calls each individual check function; none of them raise; result is always a list of 8 items
+#   sideEffects: calls each individual check function; none of them raise; result is always a list of 9 items
 def run_checks() -> list[CheckResult]:
-    """Run all eight checks; return list of CheckResult."""
+    """Run all nine checks; return list of CheckResult."""
     return [
         _check_os_is_freebsd(),
         _check_skopeo_present(),
@@ -437,6 +512,7 @@ def run_checks() -> list[CheckResult]:
         _check_racct_enabled(),
         _check_linux64_loaded(),
         _check_pkg_trust_keys(),
+        _check_devfs_delegation(),
         _check_pf_anchor_hooks(),
     ]
 # run_checks:end
