@@ -914,7 +914,14 @@ def _cmd_run(args: argparse.Namespace) -> int:
         # would otherwise see a present-but-None key and use None as the timeout
         # (no limit at all) instead of falling back to the documented default.
         opts["timeout"] = args.timeout
-    return run(image_ref=args.image, cmd=args.cmd, opts=opts)
+    try:
+        return run(image_ref=args.image, cmd=args.cmd, opts=opts)
+    except RuntimeError as exc:  # noqa: BLE001 — CLI reports a clean message, never a raw traceback
+        # run()'s own pre-flight checks (devfs delegation, VNET availability)
+        # raise RuntimeError before any jail exists; every other failure mode
+        # returns a jail's real exit code instead of raising.
+        print(f"jailrun run: refused: {exc}", file=sys.stderr)
+        return 1
 
 
 def _cmd_run_detached(args: argparse.Namespace) -> int:
