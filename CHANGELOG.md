@@ -15,6 +15,32 @@ closes, then `-beta.N` for a true feature-complete/hardening-only stage, then `1
 
 ## [Unreleased]
 
+### Fixed (2026-07-27)
+- **`jailrun run` prints a clean refusal, not a raw traceback.** `_cmd_run`
+  was the one CLI dispatch not wrapped in a try/except — `engine.run()`'s
+  pre-flight checks (devfs delegation unavailable, VNET unavailable) raise
+  `RuntimeError` before any jail exists, and that propagated as a full
+  Python traceback on stderr instead of the one-line message every other
+  subcommand gives on failure.
+
+### Validated (2026-07-27) — real-world untrusted-compile workload
+- Devfs delegation (above) and `thinbase:` mode (0.5) verified together
+  against a genuine production use case, not just synthetic tests: a
+  real user-supplied C++ `external_component` compiled to a working
+  firmware image inside a nested sandbox, network:none, on a host that
+  had never run this workload through jailrun before.
+- **Confirms a real edge of the `--network none` default**: any workload
+  whose toolchain does a live package/component-registry check — even
+  with every binary already cached locally — hard-fails under
+  `--network none`. ESP-IDF's managed-component manager is one concrete
+  example (it refuses to trust a cached component without confirming
+  freshness against the registry, regardless of pre-fetched toolchain
+  packages). There is no destination-scoped alternative to
+  `--network inherit` today; a caller that needs one has to route the
+  jail's inherited network through its own controlled egress (e.g. a
+  proxy) — jailrun itself doesn't scope by destination yet (see
+  ROADMAP.md's "Contained" gap #2, needs VNET + a per-jail pf anchor).
+
 ### Added (2026-07-26) — nested-jail devfs delegation
 - **`engine._devfs_delegation_available()`**: when jailrun itself runs
   nested (inside another application's jail), probes for real whether the
