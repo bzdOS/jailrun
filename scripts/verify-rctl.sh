@@ -1,5 +1,5 @@
 #!/bin/sh
-# build host
+# build host: rctl resource-limit verification suite on FreeBSD.
 # Tests each rctl rule type against a throwaway jail.
 # Exit 0 if all pass, 1 if any fail.
 
